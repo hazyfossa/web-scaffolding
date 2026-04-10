@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 pub use eyre;
 pub use facet::Facet;
 pub use figue as args;
+pub use rust_embed::Embed as LoadAssets;
 
 use axum_client_ip::ClientIpSource;
 use eyre::{Context, Result, bail};
