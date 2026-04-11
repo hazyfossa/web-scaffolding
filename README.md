@@ -6,6 +6,6 @@ I do not recommend depending on this as a crate, however feel free to copy-paste
 # stack
 - framework: axum
 - errors: eyre + simple-eyre + tracing
-- config: facet + figue
+- config: toml
 
 Assets are statically bundled via rust-embed

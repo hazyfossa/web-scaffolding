@@ -150,50 +150,55 @@ pub mod assets {
         response::{IntoResponse, Response},
     };
     use eyre::eyre;
-    use rust_embed::RustEmbed;
+    use rust_embed::{EmbeddedFile, RustEmbed};
 
     use super::errors::{EyreWebExt, WebResult};
 
-    pub struct ServeAssets<T: 'static>(pub &'static T);
+    #[derive(Clone)]
+    pub struct ServeAssets {
+        get: fn(&str) -> Option<EmbeddedFile>,
+    }
 
-    impl<T: 'static> Clone for ServeAssets<T> {
-        fn clone(&self) -> Self {
-            Self(self.0)
+    impl<T> From<T> for ServeAssets
+    where
+        T: RustEmbed,
+    {
+        fn from(_: T) -> Self {
+            Self { get: T::get }
         }
     }
 
-    fn asset_lookup<A: RustEmbed>(request: Request) -> WebResult<Response> {
-        let uri = request.uri().path().trim_start_matches('/');
+    impl ServeAssets {
+        fn serve(&self, request: Request) -> WebResult<Response> {
+            let uri = request.uri().path().trim_start_matches('/');
 
-        let content = A::get(uri).ok_or(
-            eyre!("404 Not Found")
-                .client_error()
-                .code(StatusCode::NOT_FOUND),
-        )?;
+            let content = (self.get)(uri).ok_or(
+                eyre!("404 Not Found")
+                    .client_error()
+                    .code(StatusCode::NOT_FOUND),
+            )?;
 
-        if request.method() != Method::GET {
-            return Err(eyre!("Method Not Allowed")
-                .client_error()
-                .code(StatusCode::METHOD_NOT_ALLOWED));
-        };
+            if request.method() != Method::GET {
+                return Err(eyre!("Method Not Allowed")
+                    .client_error()
+                    .code(StatusCode::METHOD_NOT_ALLOWED));
+            };
 
-        Ok((
-            [(header::CONTENT_TYPE, content.metadata.mimetype())],
-            content.data,
-        )
-            .into_response())
+            Ok((
+                [(header::CONTENT_TYPE, content.metadata.mimetype())],
+                content.data,
+            )
+                .into_response())
+        }
     }
 
-    impl<A> tower::Service<Request> for ServeAssets<A>
-    where
-        A: RustEmbed,
-    {
+    impl tower::Service<Request> for ServeAssets {
         type Error = std::convert::Infallible;
         type Future = std::future::Ready<Result<Response, Self::Error>>;
         type Response = Response;
 
         fn call(&mut self, request: Request) -> Self::Future {
-            std::future::ready(Ok(asset_lookup::<A>(request).into_response()))
+            std::future::ready(Ok(self.serve(request).into_response()))
         }
 
         fn poll_ready(
