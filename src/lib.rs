@@ -11,9 +11,9 @@ use tokio::{fs, net::TcpListener};
 mod utils;
 use tower::ServiceBuilder;
 use tower_http::{catch_panic::CatchPanicLayer, compression::CompressionLayer};
-pub use utils::{errors, scheduler};
 
-use crate::utils::assets::ServeAssets;
+pub use crate::utils::assets::ServeAssets as LoadedAssets;
+pub use utils::{errors, scheduler};
 
 async fn setup_network(config: &BuiltInConfig) -> Result<(TcpListener, ClientIpSource)> {
     let addr = format!("{}:{}", config.host, config.port);
@@ -86,7 +86,7 @@ pub async fn load_config<T: DeserializeOwned>() -> Result<T> {
     toml::from_str(&config?).context("Failed to parse")
 }
 
-pub async fn web_serve<Server: WebServer>() -> Result<()> {
+pub async fn run_server<Server: WebServer>() -> Result<()> {
     simple_eyre::install()?;
     tracing_subscriber::fmt::init();
 
@@ -119,7 +119,17 @@ pub async fn web_serve<Server: WebServer>() -> Result<()> {
 #[allow(async_fn_in_trait)]
 pub trait WebServer: DeserializeOwned {
     // TODO: better asset handling
-    fn assets() -> impl Into<ServeAssets>;
+    fn assets() -> impl Into<LoadedAssets>;
 
     async fn init(self) -> Result<axum::Router>;
+}
+
+#[macro_export]
+macro_rules! run {
+    ($server:ident) => {
+        #[tokio::main]
+        async fn main() -> Result<()> {
+            $crate::run_server::<$server>().await
+        }
+    };
 }
