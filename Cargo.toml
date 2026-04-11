@@ -13,6 +13,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 simple-eyre = "0.3.1"
 time = "0.3"
+toasty = { version = "0.3.0", features = [
+    "sqlite",
+    "serde",
+], optional = true, git = "https://github.com/tokio-rs/toasty.git" }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["tokio"] }
 tower-http = { version = "0.6", features = ["catch-panic"] }
@@ -21,3 +25,4 @@ tracing-subscriber = "0.3.23"
 
 [features]
 compression = ["tower-http/compression-full"]
+database = ["dep:toasty"]

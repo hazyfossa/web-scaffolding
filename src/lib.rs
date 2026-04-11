@@ -14,6 +14,14 @@ use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(feature = "compression")]
 use tower_http::compression::CompressionLayer;
 
+#[cfg(feature = "database")]
+pub use database::get as database;
+
+// TODO: drop alias once toasty becomes
+// properly importable as a crate
+#[cfg(feature = "database")]
+pub use toasty;
+
 mod utils;
 pub use crate::utils::assets::ServeAssets as LoadedAssets;
 pub use utils::{errors, scheduler};
@@ -48,22 +56,53 @@ async fn setup_network(config: &BuiltInConfig) -> Result<(TcpListener, ClientIpS
     Ok((listener, ip_source))
 }
 
-#[derive(Deserialize)]
-#[serde(default)]
-struct BuiltInConfig {
-    host: String,
-    port: u16,
-    reverse_proxy: Option<String>,
+#[cfg(feature = "database")]
+mod database {
+    use std::sync::OnceLock;
+
+    use super::*;
+
+    // TODO: use axum state?
+    static DB: OnceLock<toasty::Db> = OnceLock::new();
+
+    pub async fn setup(config: &BuiltInConfig) -> Result<()> {
+        let db = toasty::Db::builder()
+            .connect(&config.db)
+            .await
+            .context("Failed to connect to database")?;
+
+        db.push_schema()
+            .await
+            .context("Failed to push schema to database")?;
+
+        tracing::info!("Connected to database");
+
+        DB.set(db).expect("Database already initialized");
+        Ok(())
+    }
+
+    pub async fn get() -> toasty::Db {
+        DB.get().expect("Database not initialized").clone()
+    }
 }
 
-impl Default for BuiltInConfig {
-    fn default() -> Self {
-        Self {
-            host: "localhost".to_string(),
-            port: 8080,
-            reverse_proxy: None,
-        }
-    }
+fn default_host() -> String {
+    "localhost".to_string()
+}
+
+fn default_port() -> u16 {
+    8080
+}
+
+#[derive(Deserialize)]
+struct BuiltInConfig {
+    #[serde(default = "default_host")]
+    host: String,
+    #[serde(default = "default_port")]
+    port: u16,
+    reverse_proxy: Option<String>,
+    #[cfg(feature = "database")]
+    db: String,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +160,9 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
             .br(true)
             .zstd(true),
     );
+
+    #[cfg(feature = "database")]
+    database::setup(&config.built_in).await?;
 
     let router = router
         .fallback_service(Server::assets().into())

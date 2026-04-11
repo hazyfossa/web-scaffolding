@@ -7,5 +7,6 @@ I do not recommend depending on this as a crate, however feel free to copy-paste
 - framework: axum
 - errors: eyre + simple-eyre + tracing
 - config: toml
+- database: sqlite + toasty
 
 Assets are statically bundled via rust-embed
