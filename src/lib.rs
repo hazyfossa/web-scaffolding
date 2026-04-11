@@ -4,14 +4,17 @@ pub use axum_client_ip::ClientIp;
 pub use rust_embed::Embed as LoadAssets;
 
 use axum_client_ip::ClientIpSource;
-use eyre::{Context, Result, bail};
+use eyre::{Context, Result};
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{fs, net::TcpListener};
 
-mod utils;
 use tower::ServiceBuilder;
-use tower_http::{catch_panic::CatchPanicLayer, compression::CompressionLayer};
+use tower_http::catch_panic::CatchPanicLayer;
 
+#[cfg(feature = "compression")]
+use tower_http::compression::CompressionLayer;
+
+mod utils;
 pub use crate::utils::assets::ServeAssets as LoadedAssets;
 pub use utils::{errors, scheduler};
 
@@ -31,8 +34,14 @@ async fn setup_network(config: &BuiltInConfig) -> Result<(TcpListener, ClientIpS
             "cloudflare" => ClientIpSource::CfConnectingIp,
             "cloudfront" => ClientIpSource::CloudFrontViewerAddress,
             "flyio" => ClientIpSource::FlyClientIp,
-            // TODO: support full axum-client-ip
-            other => bail!("{other} is not a supported proxy type"),
+            "akamai" => ClientIpSource::TrueClientIp,
+            "envoy" => ClientIpSource::XEnvoyExternalAddress,
+            other => {
+                tracing::info!(
+                    "Expecting {other} reverse-proxy to provide X-Forwarded-For headers"
+                );
+                ClientIpSource::RightmostXForwardedFor
+            }
         },
     };
 
@@ -83,7 +92,7 @@ pub async fn load_config<T: DeserializeOwned>() -> Result<T> {
         config = config.context("You can change the configuration path with '-c' or '--config'")
     }
 
-    toml::from_str(&config?).context("Failed to parse")
+    serde_json::from_str(&config?).context("Failed to parse")
 }
 
 pub async fn run_server<Server: WebServer>() -> Result<()> {
@@ -100,12 +109,22 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 
     let router = Server::init(config.user_defined).await?;
 
-    let router = router.fallback_service(Server::assets().into()).layer(
-        ServiceBuilder::new()
-            .layer(CatchPanicLayer::new())
-            .layer(CompressionLayer::new())
-            .layer(ip_source.into_extension()),
+    let middleware = ServiceBuilder::new()
+        .layer(CatchPanicLayer::new())
+        .layer(ip_source.into_extension());
+
+    #[cfg(feature = "compression")]
+    let middleware = middleware.layer(
+        CompressionLayer::new()
+            .gzip(true)
+            .deflate(true)
+            .br(true)
+            .zstd(true),
     );
+
+    let router = router
+        .fallback_service(Server::assets().into())
+        .layer(middleware);
 
     let service = router.into_make_service_with_connect_info::<SocketAddr>();
 
