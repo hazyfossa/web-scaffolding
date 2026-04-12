@@ -1,10 +1,10 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{io::ErrorKind, net::SocketAddr, path::PathBuf};
 
 pub use axum_client_ip::ClientIp;
 pub use rust_embed::Embed as LoadAssets;
 
 use axum_client_ip::ClientIpSource;
-use eyre::{Context, Result};
+use eyre::{Context, Result, bail};
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{fs, net::TcpListener};
 
@@ -13,6 +13,9 @@ use tower_http::catch_panic::CatchPanicLayer;
 
 #[cfg(feature = "compression")]
 use tower_http::compression::CompressionLayer;
+
+// #[cfg(feature = "store")]
+// pub mod store;
 
 #[cfg(feature = "database")]
 pub use database::get as database;
@@ -66,8 +69,13 @@ mod database {
     static DB: OnceLock<toasty::Db> = OnceLock::new();
 
     pub async fn setup(config: &BuiltInConfig) -> Result<()> {
+        let uri = config.db.as_deref().unwrap_or_else(|| {
+            tracing::warn!("Using an in-memory database. Data will not be saved!");
+            ":memory:"
+        });
+
         let db = toasty::Db::builder()
-            .connect(&config.db)
+            .connect(&uri)
             .await
             .context("Failed to connect to database")?;
 
@@ -81,31 +89,34 @@ mod database {
         Ok(())
     }
 
-    pub async fn get() -> toasty::Db {
+    pub fn get() -> toasty::Db {
         DB.get().expect("Database not initialized").clone()
     }
 }
 
-fn default_host() -> String {
-    "localhost".to_string()
-}
-
-fn default_port() -> u16 {
-    8080
-}
-
 #[derive(Deserialize)]
+#[serde(default)]
 struct BuiltInConfig {
-    #[serde(default = "default_host")]
     host: String,
-    #[serde(default = "default_port")]
     port: u16,
     reverse_proxy: Option<String>,
     #[cfg(feature = "database")]
-    db: String,
+    db: Option<String>,
 }
 
-#[derive(Deserialize)]
+impl Default for BuiltInConfig {
+    fn default() -> Self {
+        Self {
+            host: "localhost".into(),
+            port: 8080,
+            reverse_proxy: None,
+            #[cfg(feature = "database")]
+            db: None,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
 struct WithBuiltinConfig<T> {
     #[serde(flatten)]
     built_in: BuiltInConfig,
@@ -113,25 +124,27 @@ struct WithBuiltinConfig<T> {
     user_defined: T,
 }
 
-pub async fn load_config<T: DeserializeOwned>() -> Result<T> {
+pub async fn load_config<T: DeserializeOwned + Default>() -> Result<T> {
     let mut args = pico_args::Arguments::from_env();
 
-    const DEFAULT_PATH: &str = "./config.toml";
+    const DEFAULT_PATH: &str = "./config.json";
 
-    let path: PathBuf = args
-        .opt_value_from_str(["--config", "-c"])
-        .context("Failed to parse cli argument: --config")?
-        .unwrap_or(DEFAULT_PATH.into());
+    let path: Option<PathBuf> = args
+        .opt_value_from_str(["-c", "--config"])
+        .context("Failed to parse cli argument: --config")?;
 
-    let mut config = fs::read_to_string(&path)
-        .await
-        .wrap_err_with(|| format!("Failed to read from {path:?}"));
+    let (path, is_default_path) =
+        path.map_or((DEFAULT_PATH.into(), true), |custom| (custom, false));
 
-    if *path == *DEFAULT_PATH {
-        config = config.context("You can change the configuration path with '-c' or '--config'")
-    }
+    let file = match fs::read_to_string(&path).await {
+        Ok(string) => string,
+        Err(e) if is_default_path && e.kind() == ErrorKind::NotFound => {
+            return Ok(T::default());
+        }
+        Err(e) => bail!(e),
+    };
 
-    serde_json::from_str(&config?).context("Failed to parse")
+    serde_json::from_str(&file).context("Failed to parse")
 }
 
 pub async fn run_server<Server: WebServer>() -> Result<()> {
@@ -178,7 +191,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 }
 
 #[allow(async_fn_in_trait)]
-pub trait WebServer: DeserializeOwned {
+pub trait WebServer: DeserializeOwned + Default {
     // TODO: better asset handling
     fn assets() -> impl Into<LoadedAssets>;
 
