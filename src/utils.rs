@@ -209,3 +209,70 @@ pub mod assets {
         }
     }
 }
+
+#[cfg(feature = "store")]
+pub mod timed_uuid {
+    use std::{ops::Deref, str::FromStr};
+
+    use eyre::{Context, ContextCompat, Ok, Result};
+    use time::{Duration, OffsetDateTime};
+    use uuid::Uuid;
+
+    pub fn timestamp_from_uuid(uuid: &Uuid) -> Result<OffsetDateTime> {
+        let ts = uuid
+            .get_timestamp()
+            .context("UUID is not a time-based version (expected v1, v6, or v7)")?;
+
+        let (seconds, subsec_nanos) = ts.to_unix();
+
+        let seconds = seconds
+            .try_into()
+            .wrap_err("Overflow: Unix timestamp too large for i64")?;
+
+        let subsec_nanos = Duration::nanoseconds(subsec_nanos.into());
+
+        let base_time =
+            OffsetDateTime::from_unix_timestamp(seconds).context("Invalid Unix timestamp")?;
+
+        Ok(base_time + subsec_nanos)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct TimedUuid(Uuid);
+
+    impl Deref for TimedUuid {
+        type Target = Uuid;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl TimedUuid {
+        pub fn new_now() -> Result<Self> {
+            let uuid = Uuid::now_v7();
+            uuid.try_into()
+        }
+
+        pub fn timestamp(&self) -> OffsetDateTime {
+            timestamp_from_uuid(&self).expect("Timestamp conversion failed")
+        }
+    }
+
+    impl TryFrom<Uuid> for TimedUuid {
+        type Error = eyre::Error;
+
+        fn try_from(value: Uuid) -> std::result::Result<Self, Self::Error> {
+            let _check = timestamp_from_uuid(&value).context("Invalid timestamp")?;
+            Ok(Self(value))
+        }
+    }
+
+    impl FromStr for TimedUuid {
+        type Err = eyre::Error;
+
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            let uuid = Uuid::from_str(s)?;
+            uuid.try_into()
+        }
+    }
+}

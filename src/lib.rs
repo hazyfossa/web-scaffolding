@@ -14,8 +14,8 @@ use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(feature = "compression")]
 use tower_http::compression::CompressionLayer;
 
-// #[cfg(feature = "store")]
-// pub mod store;
+#[cfg(feature = "store")]
+pub mod store;
 
 #[cfg(feature = "database")]
 pub use database::get as database;
