@@ -173,7 +173,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     let middleware = middleware.layer(tower_cookies::CookieManagerLayer::new());
 
     #[cfg(feature = "session")]
-    let session_state = session::setup_session::<Server>(&config.built_in)?;
+    let session_state = session::setup_sessions::<Server>(&config.built_in)?;
 
     let router = router
         .fallback_service(ServeAssets::from(Server::assets()))

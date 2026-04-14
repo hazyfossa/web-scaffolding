@@ -14,32 +14,30 @@ use crate::utils::{scheduler, timed_uuid::TimedUuid};
 
 pub type ID = TimedUuid;
 
-pub trait Value: Send + Sync + 'static {
-    const LIFETIME: Duration;
-}
+pub trait Value: Send + Sync + 'static {}
+impl<T> Value for T where T: Send + Sync + 'static {}
 
 // TODO: consider readonly refs
 
 #[derive(Shrinkwrap)]
 #[shrinkwrap(mutable)]
-#[shrinkwrap(unsafe_ignore_visibility)]
-pub struct ValueRef<'a, T>(OccupiedEntry<'a, ID, T>);
+pub struct ValueRef<'store, T> {
+    #[shrinkwrap(main_field)]
+    pub entry: OccupiedEntry<'store, ID, T>,
+    lifetime: &'store Duration,
+}
 
-impl<'a, T: Value> ValueRef<'a, T> {
+impl<'a, T> ValueRef<'a, T> {
     pub fn id(&self) -> &ID {
         self.key()
     }
 
     pub fn expires(&self) -> OffsetDateTime {
-        self.key().timestamp() + T::LIFETIME
-    }
-
-    pub fn entry(self) -> OccupiedEntry<'a, ID, T> {
-        self.0
+        self.key().timestamp() + *self.lifetime
     }
 
     pub fn remove(self) -> T {
-        self.entry().remove()
+        self.entry.remove()
     }
 }
 
@@ -50,9 +48,9 @@ pub struct Store<T> {
 }
 
 impl<'a, T: Value> Store<T> {
-    pub fn new() -> Self {
+    pub fn new(lifetime: Duration) -> Self {
         Self {
-            inner: Arc::new(StoreInner::new()),
+            inner: Arc::new(StoreInner::new(lifetime)),
         }
     }
 
@@ -73,20 +71,25 @@ impl<'a, T: Value> Store<T> {
         );
         self
     }
-
-    pub fn with_auto_cleanup(self) -> Self {
-        self.with_cleanup(T::LIFETIME)
-    }
 }
 
 pub struct StoreInner<T> {
     data: HashMap<ID, T>,
+    lifetime: Duration,
 }
 
-impl<T: Value> StoreInner<T> {
-    fn new() -> Self {
+impl<T> StoreInner<T> {
+    fn new(lifetime: Duration) -> Self {
         Self {
             data: HashMap::new(),
+            lifetime,
+        }
+    }
+
+    fn value_ref<'a>(&'a self, entry: OccupiedEntry<'a, ID, T>) -> ValueRef<'a, T> {
+        ValueRef {
+            entry,
+            lifetime: &self.lifetime,
         }
     }
 
@@ -98,7 +101,7 @@ impl<T: Value> StoreInner<T> {
             Entry::Vacant(place) => place.insert_entry(data),
         };
 
-        Ok(ValueRef(entry))
+        Ok(self.value_ref(entry))
     }
 
     pub async fn exists(&self, id: &ID) -> bool {
@@ -106,7 +109,7 @@ impl<T: Value> StoreInner<T> {
     }
 
     pub async fn query(&self, id: &ID) -> Option<ValueRef<'_, T>> {
-        let value_ref = self.data.get_async(id).await.map(ValueRef)?;
+        let value_ref = self.data.get_async(id).await.map(|e| self.value_ref(e))?;
 
         let now = OffsetDateTime::now_utc();
         let expired = now > value_ref.expires();
@@ -123,7 +126,7 @@ impl<T: Value> StoreInner<T> {
 
         self.data
             .retain_async(|uuid, _| {
-                let expires = uuid.timestamp() + T::LIFETIME;
+                let expires = uuid.timestamp() + self.lifetime;
                 now < expires
             })
             .await;

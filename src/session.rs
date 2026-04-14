@@ -11,7 +11,7 @@ use tower_cookies::{Cookie, Cookies, SignedCookies};
 use crate::{
     BuiltInConfig, WebServer,
     errors::{WebError, WebResult},
-    store::{ID, Store, Value, ValueRef},
+    store::{ID, Store, ValueRef},
 };
 
 pub use tower_cookies::Key;
@@ -21,9 +21,10 @@ pub use tower_cookies::Key;
 
 #[derive_where(Clone)]
 pub struct SessionState<T> {
-    pub store: Store<T>,
-    pub cookie_name: &'static str,
-    pub key: Key,
+    store: Store<T>,
+    cookie_name: &'static str,
+    key: Key,
+    insecure: bool,
 }
 
 // TODO: proper Session as 'static ValueRef requires const generics
@@ -33,7 +34,7 @@ pub struct Session<T> {
     store_ref: Store<T>,
 }
 
-impl<T: Value> Session<T> {
+impl<T> Session<T> {
     pub async fn resolve(&self) -> WebResult<ValueRef<'_, T>> {
         let entry = self
             .store_ref
@@ -63,7 +64,7 @@ pub struct SessionManager<T> {
     _unsigned_cookies: Cookies,
 }
 
-impl<T: Value> SessionManager<T> {
+impl<T> SessionManager<T> {
     fn cookies(&self) -> SignedCookies<'_> {
         self._unsigned_cookies.signed(&self.state.key)
     }
@@ -89,7 +90,10 @@ impl<T: Value> SessionManager<T> {
 
     pub async fn create(&self, data: T) -> Result<ValueRef<'_, T>> {
         let SessionState {
-            store, cookie_name, ..
+            store,
+            cookie_name,
+            insecure,
+            ..
         } = &self.state;
 
         let entry = store.insert(data).await?;
@@ -98,6 +102,7 @@ impl<T: Value> SessionManager<T> {
         let cookie = Cookie::build((*cookie_name, entry.id().to_string()))
             .expires(entry.expires())
             .http_only(true)
+            .secure(!insecure)
             .build();
 
         self.cookies().add(cookie);
@@ -109,7 +114,7 @@ impl<T: Value> SessionManager<T> {
 impl<S, T> FromRequestParts<S> for SessionManager<T>
 where
     S: Send + Sync,
-    T: Value,
+    T: Send + Sync,
     SessionState<T>: FromRef<S>,
 {
     type Rejection = <Cookies as FromRequestParts<S>>::Rejection;
@@ -131,7 +136,7 @@ where
 impl<S, T> FromRequestParts<S> for Session<T>
 where
     S: Send + Sync,
-    T: Value,
+    T: Send + Sync,
     SessionState<T>: FromRef<S>,
 {
     type Rejection = WebError;
@@ -149,32 +154,40 @@ where
 pub struct SessionSettings {
     #[builder(default)]
     pub cookie_name: &'static str,
-    pub cleanup: Option<Duration>,
+    pub lifetime: Duration,
+    pub cleanup_interval: Option<Duration>,
     pub key: Option<Key>,
+    pub insecure: bool,
 }
 
 impl Default for SessionSettings {
     fn default() -> Self {
         Self {
             cookie_name: "session",
-            cleanup: None,
+            lifetime: Duration::days(14),
+            cleanup_interval: None,
             key: None,
+            insecure: false,
         }
     }
 }
 
-pub(crate) fn setup_session<Server: WebServer>(
+pub(crate) fn setup_sessions<Server: WebServer>(
     config: &BuiltInConfig,
 ) -> Result<SessionState<Server::SessionData>> {
-    let settings = Server::session_sesttings();
-    let cookie_name = settings.cookie_name;
+    let SessionSettings {
+        cookie_name,
+        lifetime,
+        cleanup_interval,
+        key,
+        insecure,
+    } = Server::session_sesttings();
 
-    let cleanup_interval = settings.cleanup.unwrap_or(Server::SessionData::LIFETIME);
+    let cleanup_interval = cleanup_interval.unwrap_or(lifetime);
 
-    let store = Store::<Server::SessionData>::new().with_cleanup(cleanup_interval);
+    let store = Store::<Server::SessionData>::new(lifetime).with_cleanup(cleanup_interval);
 
-    let key = settings
-        .key
+    let key = key
         .or_else(|| {
             config
                 .session_key
@@ -191,5 +204,6 @@ pub(crate) fn setup_session<Server: WebServer>(
         cookie_name,
         store,
         key,
+        insecure,
     })
 }
