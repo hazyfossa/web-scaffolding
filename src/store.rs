@@ -1,3 +1,4 @@
+use derive_where::derive_where;
 use eyre::{Context, Result, bail};
 use scc::{
     HashMap,
@@ -11,7 +12,7 @@ use crate::utils::{scheduler, timed_uuid::TimedUuid};
 
 // TODO: proper support for key types other than UUID
 
-type ID = TimedUuid;
+pub type ID = TimedUuid;
 
 pub trait Value: Send + Sync + 'static {
     const LIFETIME: Duration;
@@ -21,28 +22,23 @@ pub trait Value: Send + Sync + 'static {
 
 #[derive(Shrinkwrap)]
 #[shrinkwrap(mutable)]
-// Safety: .0 on any value is redundant,
-// modifying OccupiedEntry is safe
 #[shrinkwrap(unsafe_ignore_visibility)]
 pub struct ValueRef<'a, T>(OccupiedEntry<'a, ID, T>);
 
 impl<'a, T: Value> ValueRef<'a, T> {
-    fn expires(&self) -> OffsetDateTime {
+    pub fn id(&self) -> &ID {
+        self.key()
+    }
+
+    pub fn expires(&self) -> OffsetDateTime {
         self.key().timestamp() + T::LIFETIME
     }
 }
 
 #[derive(Shrinkwrap)]
+#[derive_where(Clone)]
 pub struct Store<T> {
     inner: Arc<StoreInner<T>>,
-}
-
-impl<T> Clone for Store<T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
 }
 
 impl<'a, T: Value> Store<T> {
@@ -97,16 +93,12 @@ impl<T: Value> StoreInner<T> {
         Ok(ValueRef(entry))
     }
 
-    /// Same as query, except does not perform expiry check,
-    /// allowing retrieval of technically invalid values
-    /// Do NOT use in security-sensitive scenarions
-    #[inline]
-    pub async fn query_relaxed(&self, id: &ID) -> Option<ValueRef<'_, T>> {
-        self.data.get_async(id).await.map(|v| ValueRef(v))
+    pub async fn exists(&self, id: &ID) -> bool {
+        self.data.contains_async(id).await
     }
 
     pub async fn query(&self, id: &ID) -> Option<ValueRef<'_, T>> {
-        let value_ref = self.query_relaxed(&id).await?;
+        let value_ref = self.data.get_async(id).await.map(ValueRef)?;
 
         let now = OffsetDateTime::now_utc();
         let expired = now > value_ref.expires();

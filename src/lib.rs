@@ -17,6 +17,9 @@ use tower_http::compression::CompressionLayer;
 #[cfg(feature = "store")]
 pub mod store;
 
+#[cfg(feature = "session")]
+pub mod session;
+
 #[cfg(feature = "database")]
 pub use database::get as database;
 
@@ -26,7 +29,7 @@ pub use database::get as database;
 pub use toasty;
 
 mod utils;
-pub use crate::utils::assets::ServeAssets as LoadedAssets;
+use utils::assets::ServeAssets;
 pub use utils::{errors, scheduler};
 
 async fn setup_network(config: &BuiltInConfig) -> Result<(TcpListener, ClientIpSource)> {
@@ -177,8 +180,25 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     #[cfg(feature = "database")]
     database::setup(&config.built_in).await?;
 
+    #[cfg(feature = "session")]
+    let (router, middleware) = {
+        use session::SessionState;
+        use store::Store;
+        use tower_cookies::CookieManagerLayer;
+
+        let middleware = middleware.layer(CookieManagerLayer::new());
+
+        let store = Store::<Server::SessionData>::new().with_auto_cleanup();
+        let router = router.with_state(SessionState {
+            store,
+            cookie_name: Server::SESSION_COOKIE,
+        });
+
+        (router, middleware)
+    };
+
     let router = router
-        .fallback_service(Server::assets().into())
+        .fallback_service(ServeAssets::from(Server::assets()))
         .layer(middleware);
 
     let service = router.into_make_service_with_connect_info::<SocketAddr>();
@@ -192,10 +212,15 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 
 #[allow(async_fn_in_trait)]
 pub trait WebServer: DeserializeOwned + Default {
-    // TODO: better asset handling
-    fn assets() -> impl Into<LoadedAssets>;
+    #[cfg(feature = "session")]
+    type SessionData: store::Value;
+    #[cfg(feature = "session")]
+    const SESSION_COOKIE: &'static str = "session";
 
-    async fn init(self) -> Result<axum::Router>;
+    // TODO: better asset handling
+    fn assets() -> impl LoadAssets;
+
+    async fn init<S>(self) -> Result<axum::Router<S>>;
 }
 
 #[macro_export]

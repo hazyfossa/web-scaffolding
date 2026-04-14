@@ -5,13 +5,13 @@ pub mod shutdown {
         let ctrl_c = async {
             signal::ctrl_c()
                 .await
-                .expect("failed to install Ctrl+C handler");
+                .expect("Failed to install Ctrl+C handler");
         };
 
         #[cfg(unix)]
         let terminate = async {
             signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("failed to install signal handler")
+                .expect("Failed to install signal handler")
                 .recv()
                 .await;
         };
@@ -51,7 +51,7 @@ pub mod scheduler {
     }
 }
 
-#[allow(dead_code)]
+// TODO: better semantics. ext of result instead of eyre::Error?
 pub mod errors {
     use axum::{BoxError, http::StatusCode, response::IntoResponse};
 
@@ -74,18 +74,18 @@ pub mod errors {
             self
         }
 
-        pub fn internal(error: BoxError) -> Self {
+        pub fn internal(error: impl Into<BoxError>) -> Self {
             WebError {
                 kind: WebErrorKind::Internal,
-                inner: error,
+                inner: error.into(),
                 code: None,
             }
         }
 
-        pub fn client(error: BoxError) -> Self {
+        pub fn client(error: impl Into<BoxError>) -> Self {
             WebError {
                 kind: WebErrorKind::Client,
-                inner: error,
+                inner: error.into(),
                 code: None,
             }
         }
@@ -100,7 +100,7 @@ pub mod errors {
                     tracing::warn!("Client error: {}", self.inner);
                     (
                         self.code.unwrap_or(StatusCode::BAD_REQUEST),
-                        self.inner.to_string(),
+                        format!("{:?}", self.inner),
                     )
                 }
                 WebErrorKind::Internal => {
@@ -120,7 +120,7 @@ pub mod errors {
     impl From<(StatusCode, &'static str)> for WebError {
         fn from(value: (StatusCode, &'static str)) -> Self {
             let (code, string) = value;
-            Self::internal(string.into()).code(code)
+            Self::internal(string).code(code)
         }
     }
 
@@ -128,7 +128,7 @@ pub mod errors {
 
     impl From<eyre::Error> for WebError {
         fn from(value: eyre::Error) -> Self {
-            Self::internal(value.into())
+            Self::internal(value)
         }
     }
 
@@ -138,7 +138,7 @@ pub mod errors {
 
     impl EyreWebExt for eyre::Error {
         fn client_error(self) -> WebError {
-            WebError::client(self.into())
+            WebError::client(self)
         }
     }
 }
@@ -212,7 +212,7 @@ pub mod assets {
 
 #[cfg(feature = "store")]
 pub mod timed_uuid {
-    use std::{ops::Deref, str::FromStr};
+    use std::{fmt::Display, ops::Deref, str::FromStr};
 
     use eyre::{Context, ContextCompat, Ok, Result};
     use time::{Duration, OffsetDateTime};
@@ -247,6 +247,12 @@ pub mod timed_uuid {
         }
     }
 
+    impl Display for TimedUuid {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
     impl TimedUuid {
         pub fn new_now() -> Result<Self> {
             let uuid = Uuid::now_v7();
@@ -254,6 +260,7 @@ pub mod timed_uuid {
         }
 
         pub fn timestamp(&self) -> OffsetDateTime {
+            // This .expect is guarded by _check at try_from
             timestamp_from_uuid(&self).expect("Timestamp conversion failed")
         }
     }
