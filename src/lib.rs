@@ -1,27 +1,27 @@
 use std::{io::ErrorKind, net::SocketAddr, path::PathBuf};
 
+use axum::extract::FromRef;
 pub use axum_client_ip::ClientIp;
+use derive_where::derive_where;
 pub use rust_embed::Embed as LoadAssets;
 
-use axum_client_ip::ClientIpSource;
 use eyre::{Context, Result, bail};
 use serde::{Deserialize, de::DeserializeOwned};
-use tokio::{fs, net::TcpListener};
+use tokio::fs;
 
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
-
-#[cfg(feature = "compression")]
-use tower_http::compression::CompressionLayer;
 
 #[cfg(feature = "store")]
 pub mod store;
 
 #[cfg(feature = "session")]
 pub mod session;
+#[cfg(feature = "session")]
+pub use crate::session::{SessionSettings, SessionState};
 
 #[cfg(feature = "database")]
-pub use database::get as database;
+pub use utils::database::get as database;
 
 // TODO: drop alias once toasty becomes
 // properly importable as a crate
@@ -32,70 +32,7 @@ mod utils;
 use utils::assets::ServeAssets;
 pub use utils::{errors, scheduler};
 
-async fn setup_network(config: &BuiltInConfig) -> Result<(TcpListener, ClientIpSource)> {
-    let addr = format!("{}:{}", config.host, config.port);
-
-    let listener = TcpListener::bind(&addr)
-        .await
-        .context("Failed to bind listener")?;
-
-    tracing::info!("Listening on http://{addr}");
-
-    let ip_source = match &config.reverse_proxy {
-        None => ClientIpSource::ConnectInfo,
-        Some(proxy) => match proxy.as_str() {
-            "nginx" => ClientIpSource::XRealIp,
-            "cloudflare" => ClientIpSource::CfConnectingIp,
-            "cloudfront" => ClientIpSource::CloudFrontViewerAddress,
-            "flyio" => ClientIpSource::FlyClientIp,
-            "akamai" => ClientIpSource::TrueClientIp,
-            "envoy" => ClientIpSource::XEnvoyExternalAddress,
-            other => {
-                tracing::info!(
-                    "Expecting {other} reverse-proxy to provide X-Forwarded-For headers"
-                );
-                ClientIpSource::RightmostXForwardedFor
-            }
-        },
-    };
-
-    Ok((listener, ip_source))
-}
-
-#[cfg(feature = "database")]
-mod database {
-    use std::sync::OnceLock;
-
-    use super::*;
-
-    // TODO: use axum state?
-    static DB: OnceLock<toasty::Db> = OnceLock::new();
-
-    pub async fn setup(config: &BuiltInConfig) -> Result<()> {
-        let uri = config.db.as_deref().unwrap_or_else(|| {
-            tracing::warn!("Using an in-memory database. Data will not be saved!");
-            ":memory:"
-        });
-
-        let db = toasty::Db::builder()
-            .connect(&uri)
-            .await
-            .context("Failed to connect to database")?;
-
-        db.push_schema()
-            .await
-            .context("Failed to push schema to database")?;
-
-        tracing::info!("Connected to database");
-
-        DB.set(db).expect("Database already initialized");
-        Ok(())
-    }
-
-    pub fn get() -> toasty::Db {
-        DB.get().expect("Database not initialized").clone()
-    }
-}
+// Config
 
 #[derive(Deserialize)]
 #[serde(default)]
@@ -105,6 +42,8 @@ struct BuiltInConfig {
     reverse_proxy: Option<String>,
     #[cfg(feature = "database")]
     db: Option<String>,
+    #[cfg(feature = "session")]
+    session_key: Option<Vec<u8>>,
 }
 
 impl Default for BuiltInConfig {
@@ -115,6 +54,8 @@ impl Default for BuiltInConfig {
             reverse_proxy: None,
             #[cfg(feature = "database")]
             db: None,
+            #[cfg(feature = "session")]
+            session_key: None,
         }
     }
 }
@@ -150,6 +91,48 @@ pub async fn load_config<T: DeserializeOwned + Default>() -> Result<T> {
     serde_json::from_str(&file).context("Failed to parse")
 }
 
+// State
+
+#[derive_where(Clone)]
+pub struct ServerState<T: WebServer> {
+    #[cfg(feature = "database")]
+    db: toasty::Db,
+    #[cfg(feature = "session")]
+    session_state: SessionState<T::SessionData>,
+}
+
+#[cfg(feature = "database")]
+impl<T: WebServer> FromRef<ServerState<T>> for toasty::Db {
+    fn from_ref(input: &ServerState<T>) -> Self {
+        input.db.clone()
+    }
+}
+
+#[cfg(feature = "session")]
+impl<T: WebServer> FromRef<ServerState<T>> for SessionState<T::SessionData> {
+    fn from_ref(input: &ServerState<T>) -> Self {
+        input.session_state.clone()
+    }
+}
+
+// Main
+
+#[allow(async_fn_in_trait)]
+pub trait WebServer: DeserializeOwned + Default + 'static {
+    #[cfg(feature = "session")]
+    type SessionData: store::Value;
+
+    #[cfg(feature = "session")]
+    fn session_sesttings() -> SessionSettings {
+        SessionSettings::default()
+    }
+
+    // TODO: better asset handling
+    fn assets() -> impl LoadAssets;
+
+    async fn init(self) -> Result<axum::Router<ServerState<Self>>>;
+}
+
 pub async fn run_server<Server: WebServer>() -> Result<()> {
     simple_eyre::install()?;
     tracing_subscriber::fmt::init();
@@ -158,7 +141,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .await
         .context("Failed to load config")?;
 
-    let (listener, ip_source) = setup_network(&config.built_in)
+    let (listener, ip_source) = utils::network::setup_network(&config.built_in)
         .await
         .context("Failed to set up network")?;
 
@@ -170,7 +153,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 
     #[cfg(feature = "compression")]
     let middleware = middleware.layer(
-        CompressionLayer::new()
+        tower_http::compression::CompressionLayer::new()
             .gzip(true)
             .deflate(true)
             .br(true)
@@ -178,28 +161,26 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     );
 
     #[cfg(feature = "database")]
-    database::setup(&config.built_in).await?;
+    let db = {
+        utils::database::setup(&config.built_in).await?;
+        database()
+    };
+
+    #[cfg(feature = "cookies")]
+    let middleware = middleware.layer(tower_cookies::CookieManagerLayer::new());
 
     #[cfg(feature = "session")]
-    let (router, middleware) = {
-        use session::SessionState;
-        use store::Store;
-        use tower_cookies::CookieManagerLayer;
-
-        let middleware = middleware.layer(CookieManagerLayer::new());
-
-        let store = Store::<Server::SessionData>::new().with_auto_cleanup();
-        let router = router.with_state(SessionState {
-            store,
-            cookie_name: Server::SESSION_COOKIE,
-        });
-
-        (router, middleware)
-    };
+    let session_state = session::setup_session::<Server>(&config.built_in)?;
 
     let router = router
         .fallback_service(ServeAssets::from(Server::assets()))
-        .layer(middleware);
+        .layer(middleware)
+        .with_state(ServerState {
+            #[cfg(feature = "database")]
+            db,
+            #[cfg(feature = "session")]
+            session_state,
+        });
 
     let service = router.into_make_service_with_connect_info::<SocketAddr>();
 
@@ -208,19 +189,6 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .await?;
 
     Ok(())
-}
-
-#[allow(async_fn_in_trait)]
-pub trait WebServer: DeserializeOwned + Default {
-    #[cfg(feature = "session")]
-    type SessionData: store::Value;
-    #[cfg(feature = "session")]
-    const SESSION_COOKIE: &'static str = "session";
-
-    // TODO: better asset handling
-    fn assets() -> impl LoadAssets;
-
-    async fn init<S>(self) -> Result<axum::Router<S>>;
 }
 
 #[macro_export]

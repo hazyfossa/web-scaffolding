@@ -1,3 +1,6 @@
+// Modules here are designed in a way that makes them
+// copy-pastable across projects
+
 pub mod shutdown {
     use tokio::signal;
 
@@ -48,6 +51,81 @@ pub mod scheduler {
                 task_fn().await;
             }
         });
+    }
+}
+
+pub mod network {
+    use axum_client_ip::ClientIpSource;
+    use eyre::{Context, Result};
+    use tokio::net::TcpListener;
+
+    use crate::BuiltInConfig;
+
+    pub async fn setup_network(config: &BuiltInConfig) -> Result<(TcpListener, ClientIpSource)> {
+        let addr = format!("{}:{}", config.host, config.port);
+
+        let listener = TcpListener::bind(&addr)
+            .await
+            .context("Failed to bind listener")?;
+
+        tracing::info!("Listening on http://{addr}");
+
+        let ip_source = match &config.reverse_proxy {
+            None => ClientIpSource::ConnectInfo,
+            Some(proxy) => match proxy.as_str() {
+                "nginx" => ClientIpSource::XRealIp,
+                "cloudflare" => ClientIpSource::CfConnectingIp,
+                "cloudfront" => ClientIpSource::CloudFrontViewerAddress,
+                "flyio" => ClientIpSource::FlyClientIp,
+                "akamai" => ClientIpSource::TrueClientIp,
+                "envoy" => ClientIpSource::XEnvoyExternalAddress,
+                other => {
+                    tracing::info!(
+                        "Expecting {other} reverse-proxy to provide X-Forwarded-For headers"
+                    );
+                    ClientIpSource::RightmostXForwardedFor
+                }
+            },
+        };
+
+        Ok((listener, ip_source))
+    }
+}
+
+#[cfg(feature = "database")]
+pub mod database {
+    use std::sync::OnceLock;
+
+    use eyre::{Context, Result};
+
+    use crate::BuiltInConfig;
+
+    // TODO: this is only used if accessing db outside of axum. consider removal
+    static DB: OnceLock<toasty::Db> = OnceLock::new();
+
+    pub async fn setup(config: &BuiltInConfig) -> Result<()> {
+        let uri = config.db.as_deref().unwrap_or_else(|| {
+            tracing::warn!("Using an in-memory database. Data will not be saved!");
+            ":memory:"
+        });
+
+        let db = toasty::Db::builder()
+            .connect(&uri)
+            .await
+            .context("Failed to connect to database")?;
+
+        db.push_schema()
+            .await
+            .context("Failed to push schema to database")?;
+
+        tracing::info!("Connected to database");
+
+        DB.set(db).expect("Database already initialized");
+        Ok(())
+    }
+
+    pub fn get() -> toasty::Db {
+        DB.get().expect("Database not initialized").clone()
     }
 }
 
