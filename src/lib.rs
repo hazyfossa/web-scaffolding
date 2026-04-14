@@ -1,6 +1,5 @@
-use std::{io::ErrorKind, net::SocketAddr, path::PathBuf};
+use std::{io::ErrorKind, marker::PhantomData, net::SocketAddr, path::PathBuf};
 
-use axum::extract::FromRef;
 pub use axum_client_ip::ClientIp;
 use derive_where::derive_where;
 pub use rust_embed::Embed as LoadAssets;
@@ -95,11 +94,15 @@ pub async fn load_config<T: DeserializeOwned + Default>() -> Result<T> {
 
 #[derive_where(Clone)]
 pub struct ServerState<T: WebServer> {
+    _never_empty: PhantomData<T>,
     #[cfg(feature = "database")]
     db: toasty::Db,
     #[cfg(feature = "session")]
     session_state: SessionState<T::SessionData>,
 }
+
+#[allow(unused)]
+use axum::extract::FromRef;
 
 #[cfg(feature = "database")]
 impl<T: WebServer> FromRef<ServerState<T>> for toasty::Db {
@@ -118,7 +121,7 @@ impl<T: WebServer> FromRef<ServerState<T>> for SessionState<T::SessionData> {
 // Main
 
 #[allow(async_fn_in_trait)]
-pub trait WebServer: DeserializeOwned + Default + 'static {
+pub trait WebServer: DeserializeOwned + Default + Send + Sync + 'static {
     #[cfg(feature = "session")]
     type SessionData: store::Value;
 
@@ -176,6 +179,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .fallback_service(ServeAssets::from(Server::assets()))
         .layer(middleware)
         .with_state(ServerState {
+            _never_empty: PhantomData,
             #[cfg(feature = "database")]
             db,
             #[cfg(feature = "session")]

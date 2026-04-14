@@ -45,6 +45,16 @@ impl<T: Value> Session<T> {
 
         Ok(entry)
     }
+
+    // Is faster than .resolve().remove(), but deadlocks if already resolved:
+    //
+    // ```
+    // let data = session.resolve().await?;
+    // session.remove_unresolved().await?; <-- deadlock
+    // ```
+    // pub async fn remove_unresolved(self) -> Option<()> {
+    //     self.store_ref.delete(&self.id).await.map(|_| ())
+    // }
 }
 
 #[derive_where(Clone)]
@@ -157,6 +167,8 @@ pub(crate) fn setup_session<Server: WebServer>(
     config: &BuiltInConfig,
 ) -> Result<SessionState<Server::SessionData>> {
     let settings = Server::session_sesttings();
+    let cookie_name = settings.cookie_name;
+
     let cleanup_interval = settings.cleanup.unwrap_or(Server::SessionData::LIFETIME);
 
     let store = Store::<Server::SessionData>::new().with_cleanup(cleanup_interval);
@@ -176,8 +188,8 @@ pub(crate) fn setup_session<Server: WebServer>(
         .context("Failed to get or generate session key")?;
 
     Ok(SessionState {
+        cookie_name,
         store,
-        cookie_name: settings.cookie_name,
         key,
     })
 }

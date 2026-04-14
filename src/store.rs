@@ -33,6 +33,14 @@ impl<'a, T: Value> ValueRef<'a, T> {
     pub fn expires(&self) -> OffsetDateTime {
         self.key().timestamp() + T::LIFETIME
     }
+
+    pub fn entry(self) -> OccupiedEntry<'a, ID, T> {
+        self.0
+    }
+
+    pub fn remove(self) -> T {
+        self.entry().remove()
+    }
 }
 
 #[derive(Shrinkwrap)]
@@ -106,9 +114,8 @@ impl<T: Value> StoreInner<T> {
         (!expired).then_some(value_ref)
     }
 
-    #[allow(dead_code)]
-    pub async fn delete(&self, id: &ID) {
-        self.data.remove_async(id).await;
+    pub async fn delete(&self, id: &ID) -> Option<(ID, T)> {
+        self.data.remove_async(id).await
     }
 
     async fn cleanup(&self) {
