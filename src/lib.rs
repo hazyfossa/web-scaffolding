@@ -16,6 +16,9 @@ pub use tower_http::cors::CorsLayer as Cors;
 #[cfg(feature = "store")]
 pub mod store;
 
+#[cfg(feature = "cookies")]
+pub mod cookies;
+
 #[cfg(feature = "session")]
 pub mod session;
 #[cfg(feature = "session")]
@@ -30,7 +33,6 @@ pub use utils::database::get as database;
 pub use toasty;
 
 mod utils;
-use utils::assets::ServeAssets;
 pub use utils::{errors, scheduler};
 
 // Config
@@ -181,7 +183,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     let state = { state.session_state(session::setup_sessions::<Server>(&config.built_in)?) };
 
     let router = router
-        .fallback_service(ServeAssets::from(Server::assets()))
+        .fallback_service(utils::assets::ServeAssets::from(Server::assets()))
         .layer(middleware)
         .with_state(state.build());
 

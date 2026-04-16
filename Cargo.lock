@@ -4034,6 +4034,7 @@ dependencies = [
  "serde_json",
  "shrinkwraprs",
  "simple-eyre",
+ "stable_deref_trait",
  "time",
  "toasty",
  "tokio",
@@ -4043,6 +4044,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "yoke",
 ]
 
 [[package]]
