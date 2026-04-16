@@ -1,6 +1,7 @@
 use std::{io::ErrorKind, marker::PhantomData, net::SocketAddr, path::PathBuf};
 
 pub use axum_client_ip::ClientIp;
+use bon::Builder;
 use derive_where::derive_where;
 pub use rust_embed::Embed as LoadAssets;
 
@@ -33,10 +34,12 @@ pub use utils::{errors, scheduler};
 
 // Config
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Builder)]
 #[serde(default)]
 struct BuiltInConfig {
+    #[builder(default = "localhost".into())]
     host: String,
+    #[builder(default = 80)]
     port: u16,
     reverse_proxy: Option<String>,
     #[cfg(feature = "database")]
@@ -47,15 +50,7 @@ struct BuiltInConfig {
 
 impl Default for BuiltInConfig {
     fn default() -> Self {
-        Self {
-            host: "localhost".into(),
-            port: 8080,
-            reverse_proxy: None,
-            #[cfg(feature = "database")]
-            db: None,
-            #[cfg(feature = "session")]
-            session_key: None,
-        }
+        Self::builder().build()
     }
 }
 
@@ -93,7 +88,9 @@ pub async fn load_config<T: DeserializeOwned + Default>() -> Result<T> {
 // State
 
 #[derive_where(Clone)]
+#[derive(Builder)]
 pub struct ServerState<T: WebServer> {
+    #[builder(default = PhantomData)]
     _never_empty: PhantomData<T>,
     #[cfg(feature = "database")]
     db: toasty::Db,
@@ -126,8 +123,8 @@ pub trait WebServer: DeserializeOwned + Default + Send + Sync + 'static {
     type SessionData: store::Value;
 
     #[cfg(feature = "session")]
-    fn session_sesttings() -> SessionSettings {
-        SessionSettings::default()
+    fn session_settings() -> SessionSettings {
+        SessionSettings::builder().build()
     }
 
     // TODO: better asset handling
@@ -150,6 +147,8 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 
     let router = Server::init(config.user_defined).await?;
 
+    let state = ServerState::<Server>::builder();
+
     let middleware = ServiceBuilder::new()
         .layer(CatchPanicLayer::new())
         .layer(ip_source.into_extension());
@@ -164,27 +163,21 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     );
 
     #[cfg(feature = "database")]
-    let db = {
+    let state = {
         utils::database::setup(&config.built_in).await?;
-        database()
+        state.db(database())
     };
 
     #[cfg(feature = "cookies")]
     let middleware = middleware.layer(tower_cookies::CookieManagerLayer::new());
 
     #[cfg(feature = "session")]
-    let session_state = session::setup_sessions::<Server>(&config.built_in)?;
+    let state = { state.session_state(session::setup_sessions::<Server>(&config.built_in)?) };
 
     let router = router
         .fallback_service(ServeAssets::from(Server::assets()))
         .layer(middleware)
-        .with_state(ServerState {
-            _never_empty: PhantomData,
-            #[cfg(feature = "database")]
-            db,
-            #[cfg(feature = "session")]
-            session_state,
-        });
+        .with_state(state.build());
 
     let service = router.into_make_service_with_connect_info::<SocketAddr>();
 
@@ -193,6 +186,18 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[macro_export]
+macro_rules! assets {
+    ($folder:literal) => {
+        fn assets() -> impl $crate::LoadAssets {
+            #[derive($crate::LoadAssets)]
+            #[folder = $folder]
+            struct Assets;
+            Assets
+        }
+    };
 }
 
 #[macro_export]

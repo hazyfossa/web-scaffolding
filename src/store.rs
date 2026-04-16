@@ -23,8 +23,8 @@ impl<T> Value for T where T: Send + Sync + 'static {}
 #[shrinkwrap(mutable)]
 pub struct ValueRef<'store, T> {
     #[shrinkwrap(main_field)]
-    pub entry: OccupiedEntry<'store, ID, T>,
-    lifetime: &'store Duration,
+    pub inner: OccupiedEntry<'store, ID, T>,
+    pub lifetime: &'store Duration,
 }
 
 impl<'a, T> ValueRef<'a, T> {
@@ -37,7 +37,7 @@ impl<'a, T> ValueRef<'a, T> {
     }
 
     pub fn remove(self) -> T {
-        self.entry.remove()
+        self.inner.remove()
     }
 }
 
@@ -88,7 +88,7 @@ impl<T> StoreInner<T> {
 
     fn value_ref<'a>(&'a self, entry: OccupiedEntry<'a, ID, T>) -> ValueRef<'a, T> {
         ValueRef {
-            entry,
+            inner: entry,
             lifetime: &self.lifetime,
         }
     }

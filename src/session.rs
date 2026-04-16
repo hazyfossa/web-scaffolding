@@ -6,7 +6,7 @@ use bon::Builder;
 use derive_where::derive_where;
 use eyre::{ContextCompat, Result};
 use time::Duration;
-use tower_cookies::{Cookie, Cookies, SignedCookies};
+use tower_cookies::{Cookie, Cookies, SignedCookies, cookie::SameSite};
 
 use crate::{
     BuiltInConfig, WebServer,
@@ -100,8 +100,9 @@ impl<T> SessionManager<T> {
 
         // TODO: test options' security
         let cookie = Cookie::build((*cookie_name, entry.id().to_string()))
-            .expires(entry.expires())
             .http_only(true)
+            .max_age(entry.lifetime.clone())
+            .same_site(SameSite::Strict)
             .secure(!insecure)
             .build();
 
@@ -152,24 +153,19 @@ where
 
 #[derive(Builder)]
 pub struct SessionSettings {
-    #[builder(default)]
+    #[builder(default = "session")]
     pub cookie_name: &'static str,
-    pub lifetime: Duration,
-    pub cleanup_interval: Option<Duration>,
-    pub key: Option<Key>,
-    pub insecure: bool,
-}
 
-impl Default for SessionSettings {
-    fn default() -> Self {
-        Self {
-            cookie_name: "session",
-            lifetime: Duration::days(14),
-            cleanup_interval: None,
-            key: None,
-            insecure: false,
-        }
-    }
+    #[builder(default = Duration::days(14))]
+    pub lifetime: Duration,
+
+    #[builder(default = lifetime)]
+    pub cleanup_interval: Duration,
+
+    pub key: Option<Key>,
+
+    #[builder(default)]
+    pub insecure: bool,
 }
 
 pub(crate) fn setup_sessions<Server: WebServer>(
@@ -181,9 +177,7 @@ pub(crate) fn setup_sessions<Server: WebServer>(
         cleanup_interval,
         key,
         insecure,
-    } = Server::session_sesttings();
-
-    let cleanup_interval = cleanup_interval.unwrap_or(lifetime);
+    } = Server::session_settings();
 
     let store = Store::<Server::SessionData>::new(lifetime).with_cleanup(cleanup_interval);
 

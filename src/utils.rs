@@ -361,3 +361,31 @@ pub mod timed_uuid {
         }
     }
 }
+
+pub mod json_merge {
+    use serde_json::{Value, map::Entry};
+
+    pub fn merge(destination: &mut Value, other: &Value) {
+        match (destination, other) {
+            (Value::Object(a), Value::Object(b)) => {
+                for (k, v) in b {
+                    match a.entry(k) {
+                        Entry::Occupied(mut e) => merge(e.get_mut(), v),
+                        Entry::Vacant(e) => {
+                            e.insert(v.clone());
+                        }
+                    }
+                }
+            }
+
+            (Value::Array(a), Value::Array(b)) => a.extend(b.clone()),
+            (Value::Array(a), Value::Object(b)) => a.push(Value::from(b.clone())),
+
+            // no-op
+            (_any, Value::Null) => {}
+
+            // any other
+            (a, b) => *a = b.clone(),
+        }
+    }
+}
