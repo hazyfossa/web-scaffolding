@@ -11,6 +11,7 @@ use tokio::fs;
 
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+pub use tower_http::cors::CorsLayer as Cors;
 
 #[cfg(feature = "store")]
 pub mod store;
@@ -127,6 +128,10 @@ pub trait WebServer: DeserializeOwned + Default + Send + Sync + 'static {
         SessionSettings::builder().build()
     }
 
+    fn cors() -> Option<Cors> {
+        None
+    }
+
     // TODO: better asset handling
     fn assets() -> impl LoadAssets;
 
@@ -151,7 +156,8 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 
     let middleware = ServiceBuilder::new()
         .layer(CatchPanicLayer::new())
-        .layer(ip_source.into_extension());
+        .layer(ip_source.into_extension())
+        .option_layer(Server::cors());
 
     #[cfg(feature = "compression")]
     let middleware = middleware.layer(
