@@ -39,3 +39,8 @@ database = ["dep:toasty"]
 store = ["dep:scc", "dep:uuid", "dep:shrinkwraprs"]
 cookies = ["dep:tower-cookies"]
 session = ["store", "cookies"]
+
+db-sqlite = ["toasty?/sqlite"]
+db-postgresql = ["toasty?/postgresql"]
+db-mysql = ["toasty?/mysql"]
+db-dynamodb = ["toasty?/dynamodb"]

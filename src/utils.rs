@@ -365,6 +365,8 @@ pub mod timed_uuid {
 pub mod json_merge {
     use serde_json::{Value, map::Entry};
 
+    // TODO: compile-time config overrides (not a priority)
+    #[allow(unused)]
     pub fn merge(destination: &mut Value, other: &Value) {
         match (destination, other) {
             (Value::Object(a), Value::Object(b)) => {
