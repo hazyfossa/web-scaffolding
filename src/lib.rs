@@ -25,12 +25,12 @@ pub mod session;
 pub use crate::session::{SessionSettings, SessionState};
 
 #[cfg(feature = "database")]
+pub use toasty;
+#[cfg(feature = "database")]
 pub use utils::database::get as database;
 
-// TODO: drop alias once toasty becomes
-// properly importable as a crate
-#[cfg(feature = "database")]
-pub use toasty;
+#[cfg(feature = "htmx")]
+pub use axum_htmx as htmx;
 
 mod utils;
 pub use utils::{errors, scheduler};
@@ -93,8 +93,9 @@ pub async fn load_config<T: DeserializeOwned + Default>() -> Result<T> {
 #[derive_where(Clone)]
 #[derive(Builder)]
 pub struct ServerState<T: WebServer> {
-    #[builder(default = PhantomData)]
+    #[builder(skip = PhantomData)]
     _never_empty: PhantomData<T>,
+
     #[cfg(feature = "database")]
     db: toasty::Db,
     #[cfg(feature = "session")]
@@ -120,6 +121,8 @@ impl<T: WebServer> FromRef<ServerState<T>> for SessionState<T::SessionData> {
 
 // Main
 
+pub type Router<S> = axum::Router<ServerState<S>>;
+
 #[allow(async_fn_in_trait)]
 pub trait WebServer: DeserializeOwned + Default + Send + Sync + 'static {
     #[cfg(feature = "session")]
@@ -130,6 +133,11 @@ pub trait WebServer: DeserializeOwned + Default + Send + Sync + 'static {
         SessionSettings::builder().build()
     }
 
+    #[cfg(feature = "htmx")]
+    /// Single Page Application mode:
+    /// will redirect any non-htmx requests to "/"
+    const SPA: bool = false;
+
     fn cors() -> Option<Cors> {
         None
     }
@@ -137,7 +145,7 @@ pub trait WebServer: DeserializeOwned + Default + Send + Sync + 'static {
     // TODO: better asset handling
     fn assets() -> impl LoadAssets;
 
-    async fn init(self) -> Result<axum::Router<ServerState<Self>>>;
+    async fn init(self) -> Result<Router<Self>>;
 }
 
 pub async fn run_server<Server: WebServer>() -> Result<()> {
@@ -181,6 +189,11 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 
     #[cfg(feature = "session")]
     let state = { state.session_state(session::setup_sessions::<Server>(&config.built_in)?) };
+
+    #[cfg(feature = "htmx")]
+    let middleware = middleware
+        .layer(axum_htmx::AutoVaryLayer)
+        .option_layer(Server::SPA.then_some(axum_htmx::HxRequestGuardLayer::new("/")));
 
     let router = router
         .fallback_service(utils::assets::ServeAssets::from(Server::assets()))

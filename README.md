@@ -4,7 +4,7 @@ This is a collection of code pieces I have (previously) copy-pasted across my ax
 I do not recommend depending on this as a crate, however feel free to copy-paste parts of the code.
 
 # features
-- sensible middleware
+- compression
 - logging + tracing
 - database orm + in-memory stores
 - reverse proxy integration
@@ -12,6 +12,7 @@ I do not recommend depending on this as a crate, however feel free to copy-paste
 - typed cookies
 - user sessions
 - runtime config
+- htmx integration
 - various qol
 
 [^1]: release build is a single binary

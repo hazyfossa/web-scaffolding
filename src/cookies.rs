@@ -1,6 +1,3 @@
-// Direct cookie extract is blocked by upstream cookie-rs
-// zero-copy parsing (CoW). May be solvable with yoke (Cookies as Arc Cart)
-
 use std::ops::Deref;
 
 use crate::errors::WebError;
