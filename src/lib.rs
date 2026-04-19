@@ -1,16 +1,19 @@
-use std::{io::ErrorKind, marker::PhantomData, net::SocketAddr, path::PathBuf};
+use std::{marker::PhantomData, net::SocketAddr};
 
-pub use axum_client_ip::ClientIp;
 use bon::Builder;
+use clap::Args;
+use clap::Parser;
 use derive_where::derive_where;
 pub use rust_embed::Embed as LoadAssets;
 
-use eyre::{Context, Result, bail};
-use serde::{Deserialize, de::DeserializeOwned};
+use eyre::{Context, Result};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::fs;
 
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+
+pub use axum_client_ip::ClientIp;
 pub use tower_http::cors::CorsLayer as Cors;
 
 #[cfg(feature = "store")]
@@ -37,18 +40,39 @@ pub use utils::{errors, scheduler};
 
 // Config
 
-#[derive(Deserialize, Builder)]
+#[derive(Parser)]
+struct Cli<S: WebServer> {
+    /// configuration file (cli options take precedence)
+    #[clap(short, long)]
+    config_file: Option<String>,
+    #[clap(flatten)]
+    config: Config<S>,
+}
+
+#[derive(Serialize, Deserialize, Builder, Args)]
 #[serde(default)]
+/// Runtime configuration
 struct BuiltInConfig {
+    #[clap(long)]
+    #[clap(default_value = "localhost")]
     #[builder(default = "localhost".into())]
     host: String,
-    #[builder(default = 80)]
+
+    #[clap(default_value = "8080")]
+    #[builder(default = 8080)]
+    #[clap(short, long)]
     port: u16,
+
+    #[clap(long)]
     reverse_proxy: Option<String>,
+
     #[cfg(feature = "database")]
+    #[clap(long)]
     db: Option<String>,
+
     #[cfg(feature = "session")]
-    session_key: Option<Vec<u8>>,
+    #[clap(long)]
+    session_key_file: Option<String>,
 }
 
 impl Default for BuiltInConfig {
@@ -57,35 +81,43 @@ impl Default for BuiltInConfig {
     }
 }
 
-#[derive(Deserialize, Default)]
-struct WithBuiltinConfig<T> {
+#[allow(private_interfaces)]
+pub type ConfigOverride = BuiltInConfig;
+
+#[derive(Serialize, Deserialize, Default, Args)]
+struct Config<S: Args> {
     #[serde(flatten)]
+    #[clap(flatten)]
     built_in: BuiltInConfig,
+
     #[serde(flatten)]
-    user_defined: T,
+    #[clap(flatten)]
+    user_defined: Option<S>,
 }
 
-pub async fn load_config<T: DeserializeOwned + Default>() -> Result<T> {
-    let mut args = pico_args::Arguments::from_env();
+async fn load_config<S: WebServer>() -> Result<Config<S>> {
+    let cli = Cli::<S>::parse();
 
-    const DEFAULT_PATH: &str = "./config.json";
+    let from_cli = cli.config;
 
-    let path: Option<PathBuf> = args
-        .opt_value_from_str(["-c", "--config"])
-        .context("Failed to parse cli argument: --config")?;
+    // Only override built-ins, since user_defined overrides
+    // are just... defaults
+    let from_compile_time = S::config_override().map(|v| Config {
+        user_defined: None,
+        built_in: v,
+    });
 
-    let (path, is_default_path) =
-        path.map_or((DEFAULT_PATH.into(), true), |custom| (custom, false));
-
-    let file = match fs::read_to_string(&path).await {
-        Ok(string) => string,
-        Err(e) if is_default_path && e.kind() == ErrorKind::NotFound => {
-            return Ok(T::default());
+    let from_file: Option<Config<S>> = match cli.config_file {
+        None => None,
+        Some(path) => async {
+            let data = fs::read_to_string(&path).await?;
+            serde_json::from_str(&data).context("Failed to deserialize")
         }
-        Err(e) => bail!(e),
+        .await
+        .wrap_err_with(|| format!("Failed to read config from {path:?}"))?,
     };
 
-    serde_json::from_str(&file).context("Failed to parse")
+    merge!(from_file, from_cli, from_compile_time)
 }
 
 // State
@@ -124,7 +156,7 @@ impl<T: WebServer> FromRef<ServerState<T>> for SessionState<T::SessionData> {
 pub type Router<S> = axum::Router<ServerState<S>>;
 
 #[allow(async_fn_in_trait)]
-pub trait WebServer: DeserializeOwned + Default + Send + Sync + 'static {
+pub trait WebServer: Args + Serialize + DeserializeOwned + Default + Send + Sync + 'static {
     #[cfg(feature = "session")]
     type SessionData: store::Value;
 
@@ -145,6 +177,11 @@ pub trait WebServer: DeserializeOwned + Default + Send + Sync + 'static {
     // TODO: better asset handling
     fn assets() -> impl LoadAssets;
 
+    #[allow(private_interfaces)]
+    fn config_override() -> Option<ConfigOverride> {
+        None
+    }
+
     async fn init(self) -> Result<Router<Self>>;
 }
 
@@ -152,7 +189,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     simple_eyre::install()?;
     tracing_subscriber::fmt::init();
 
-    let config = load_config::<WithBuiltinConfig<Server>>()
+    let config = load_config::<Server>()
         .await
         .context("Failed to load config")?;
 
@@ -160,7 +197,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .await
         .context("Failed to set up network")?;
 
-    let router = Server::init(config.user_defined).await?;
+    let router = Server::init(config.user_defined.unwrap_or_default()).await?;
 
     let state = ServerState::<Server>::builder();
 

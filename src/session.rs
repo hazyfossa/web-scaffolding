@@ -183,10 +183,10 @@ pub(crate) fn setup_sessions<Server: WebServer>(
 
     let key = key
         .or_else(|| {
-            config
-                .session_key
-                .as_deref()
-                .and_then(|bytes| Key::try_from(bytes).ok())
+            config.session_key_file.as_deref().and_then(|file| {
+                let data = std::fs::read(file).ok()?;
+                Key::try_from(data.as_ref()).ok()
+            })
         })
         .or_else(|| {
             tracing::info!("Generated ephemeral session key");

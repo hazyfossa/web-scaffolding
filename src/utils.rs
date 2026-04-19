@@ -363,16 +363,53 @@ pub mod timed_uuid {
 }
 
 pub mod json_merge {
+    use eyre::{Context, Result};
+    use serde::{Serialize, de::DeserializeOwned};
     use serde_json::{Value, map::Entry};
 
-    // TODO: compile-time config overrides (not a priority)
-    #[allow(unused)]
-    pub fn merge(destination: &mut Value, other: &Value) {
+    // while merging, fields of next value overwrite fields of previous value
+    // for [a, b, c],
+    // c has highest priority (can overwrite a, b)
+    // b can only overwrite a
+    // a has lowest priority
+
+    #[macro_export]
+    macro_rules! merge {
+        ($($value:ident),+) => {
+            $crate::utils::json_merge::merge([$(
+                (stringify!($value), Option::from($value))
+            ),+])
+        };
+    }
+
+    pub fn merge<I, T, V>(values: I) -> Result<T>
+    where
+        I: IntoIterator<Item = (&'static str, V)>,
+        T: Serialize + DeserializeOwned + Default,
+        V: Into<Option<T>>,
+    {
+        let mut target = value("target", T::default())?;
+
+        for (name, diff) in values {
+            if let Some(diff) = diff.into() {
+                merge_values(&mut target, &value(name, diff)?);
+            }
+        }
+
+        serde_json::from_value(target).context("Value diverged from schema after merge")
+    }
+
+    fn value<T: Serialize>(name: &'static str, t: T) -> Result<Value> {
+        serde_json::to_value(t)
+            .wrap_err_with(|| format!("Cannot represent `{name}` as a dynamic value"))
+    }
+
+    fn merge_values(destination: &mut Value, other: &Value) {
         match (destination, other) {
             (Value::Object(a), Value::Object(b)) => {
                 for (k, v) in b {
                     match a.entry(k) {
-                        Entry::Occupied(mut e) => merge(e.get_mut(), v),
+                        Entry::Occupied(mut e) => merge_values(e.get_mut(), v),
                         Entry::Vacant(e) => {
                             e.insert(v.clone());
                         }
