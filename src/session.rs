@@ -120,14 +120,16 @@ where
     T: Send + Sync,
     SessionState<T>: FromRef<S>,
 {
-    type Rejection = <Cookies as FromRequestParts<S>>::Rejection;
+    type Rejection = WebError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
         let state = SessionState::from_ref(&state);
-        let cookies = Cookies::from_request_parts(parts, &state).await?;
+        let cookies = Cookies::from_request_parts(parts, &state)
+            .await
+            .map_err(|(code, text)| WebError::internal(text).code(code))?;
 
         Ok(Self {
             state,

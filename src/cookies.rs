@@ -112,11 +112,16 @@ where
     T: CookieDefinition,
 {
     type Rejection = WebError;
+
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
-        let cookies = Cookies::from_request_parts(parts, state).await?;
+        // TODO: is this pattern common enough to include into `errors`?
+        // we also do this in sessions...
+        let cookies = Cookies::from_request_parts(parts, state)
+            .await
+            .map_err(|(code, text)| WebError::internal(text).code(code))?;
         Ok(Cookie::<T>::get_from(cookies)?)
     }
 }

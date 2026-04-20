@@ -1,20 +1,22 @@
 #![allow(private_interfaces, private_bounds)] // TODO: this is only used for ConfigOverride
 
-use std::{marker::PhantomData, net::SocketAddr};
+use std::marker::PhantomData;
 
 use bon::Builder;
 use derive_where::derive_where;
-pub use rust_embed::Embed as LoadAssets;
-
 use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 
+mod utils;
+use crate::utils::network::{self, *};
+
 pub use axum_client_ip::ClientIp;
+pub use rust_embed::Embed as LoadAssets;
 pub use tower_http::cors::CorsLayer as Cors;
+pub use utils::{errors, scheduler};
 
 #[cfg(feature = "store")]
 pub mod store;
@@ -35,8 +37,8 @@ pub use utils::database::get as database;
 #[cfg(feature = "htmx")]
 pub use axum_htmx as htmx;
 
-mod utils;
-pub use utils::{errors, scheduler};
+#[cfg(feature = "tls")]
+pub use axum_server::tls_rustls::RustlsConfig as RustlsSettings;
 
 // Runtime config
 
@@ -53,19 +55,15 @@ struct Cli<S: WebServer> {
 #[derive(Serialize, Deserialize, Builder)]
 #[serde(default)]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
-struct BuiltInConfig {
-    #[cfg_attr(feature = "cli", clap(long))]
-    #[cfg_attr(feature = "cli", clap(default_value = "localhost"))]
-    #[builder(default = "localhost".into())]
-    host: String,
+struct RuntimeConfig {
+    #[cfg_attr(feature = "cli", clap(flatten))]
+    #[serde(flatten)]
+    #[builder(default)]
+    network: NetworkConfig,
 
-    #[cfg_attr(feature = "cli", clap(short, long))]
-    #[cfg_attr(feature = "cli", clap(default_value = "8080"))]
-    #[builder(default = 8080)]
-    port: u16,
-
-    #[cfg_attr(feature = "cli", clap(long))]
-    reverse_proxy: Option<String>,
+    #[cfg_attr(feature = "cli", clap(long, default_value = "none"))]
+    #[builder(default)]
+    reverse_proxy: ReverseProxy,
 
     #[cfg(feature = "database")]
     #[cfg_attr(feature = "cli", clap(long))]
@@ -76,13 +74,13 @@ struct BuiltInConfig {
     session_key_file: Option<std::path::PathBuf>,
 }
 
-impl Default for BuiltInConfig {
+impl Default for RuntimeConfig {
     fn default() -> Self {
         Self::builder().build()
     }
 }
 
-pub type ConfigOverride = BuiltInConfig;
+pub type ConfigOverride = RuntimeConfig;
 
 #[derive(Builder)]
 #[derive_where(Default, Serialize, Deserialize)]
@@ -90,12 +88,12 @@ pub type ConfigOverride = BuiltInConfig;
 struct Config<S: WebServer> {
     #[serde(flatten)]
     #[cfg_attr(feature = "cli", clap(flatten))]
-    built_in: BuiltInConfig,
+    runtime: RuntimeConfig,
 
     #[cfg(not(feature = "config"))]
     #[builder(skip = PhantomData)]
     #[serde(skip)]
-    #[clap(skip)]
+    #[cfg_attr(feature = "cli", clap(skip))]
     _s: PhantomData<S>,
 
     #[cfg(feature = "config")]
@@ -124,11 +122,12 @@ async fn load_config<S: WebServer>() -> Result<(Settings, Config<S>)> {
         )
     };
 
-    // Only override built-ins, since user_defined overrides are just... defaults
+    // Only override the built-in runtime config,
+    // since user_defined overrides are just... defaults
     let from_compile_time = settings
         .config_override
         .take()
-        .map(|v| Config::builder().built_in(v).build());
+        .map(|v| Config::builder().runtime(v).build());
 
     let from_file: Option<Config<S>> = match config_file {
         None => None,
@@ -153,6 +152,9 @@ pub struct Settings {
 
     #[cfg(feature = "session")]
     session: Option<SessionSettings>,
+
+    #[cfg(feature = "tls")]
+    rustls: Option<RustlsSettings>,
 }
 
 // State
@@ -217,6 +219,8 @@ pub trait WebServer: WebServerLoad + Send + Sync + 'static + Sized {
     // TODO: better asset handling
     fn assets() -> impl LoadAssets;
 
+    // TODO: support custom Connection
+
     #[cfg(feature = "session")]
     type SessionData: store::Value;
 }
@@ -229,23 +233,20 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .await
         .context("Failed to load config")?;
 
-    let (listener, ip_source) = utils::network::setup_network(&config.built_in)
-        .await
-        .context("Failed to set up network")?;
-
     #[cfg(feature = "config")]
     let user_config = config.user_defined.unwrap_or_default();
     #[cfg(not(feature = "config"))]
     let user_config = Server::default();
 
-    let router = Server::init(user_config).await?;
+    let config = config.runtime;
 
+    let router = Server::init(user_config).await?;
     let state = ServerState::<Server>::builder();
 
     let middleware = ServiceBuilder::new()
         .layer(CatchPanicLayer::new())
-        .layer(ip_source.into_extension())
-        .option_layer(settings.cors);
+        .layer(config.reverse_proxy.ip_source().into_extension())
+        .option_layer(settings.cors.take());
 
     #[cfg(feature = "compression")]
     let middleware = middleware.layer(
@@ -258,7 +259,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 
     #[cfg(feature = "database")]
     let state = {
-        utils::database::setup(&config.built_in).await?;
+        utils::database::setup(&config).await?;
         state.db(database())
     };
 
@@ -269,7 +270,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     let state = {
         state.session_state(session::setup_sessions::<Server>(
             settings.session.take().unwrap_or_default(),
-            config.built_in.session_key_file.as_deref(),
+            config.session_key_file.as_deref(),
         )?)
     };
 
@@ -281,11 +282,13 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .layer(middleware)
         .with_state(state.build());
 
-    let service = router.into_make_service_with_connect_info::<SocketAddr>();
+    let service = router.into_make_service_with_connect_info::<NetworkAddr>();
 
-    axum::serve(listener, service)
-        .with_graceful_shutdown(utils::shutdown::signal())
-        .await?;
+    let connection = network::connect(&settings, &config.network)
+        .await
+        .context("Failed to connect to network")?;
+
+    connection.serve(service).await?;
 
     Ok(())
 }

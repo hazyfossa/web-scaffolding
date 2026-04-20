@@ -2,7 +2,31 @@
 // copy-pastable across projects
 
 pub mod shutdown {
+    use std::time::Duration;
+
+    use super::network::{Connection, Handle};
     use tokio::signal;
+
+    pub struct ShutdownHandle(Handle);
+
+    impl ShutdownHandle {
+        pub fn new() -> Self {
+            Self(Handle::new())
+        }
+
+        pub fn register_connection<A>(&self, c: Connection<A>) -> Connection<A> {
+            c.handle(self.0.clone())
+        }
+
+        pub fn finalize(self) {
+            const GRACE_PERIOD: Duration = Duration::from_secs(10);
+
+            tokio::spawn(async move {
+                signal().await;
+                self.0.graceful_shutdown(Some(GRACE_PERIOD));
+            });
+        }
+    }
 
     pub async fn signal() {
         let ctrl_c = async {
@@ -55,40 +79,236 @@ pub mod scheduler {
 }
 
 pub mod network {
+    pub use std::net::SocketAddr as NetworkAddr;
+    pub type Connection<A> = axum_server::Server<NetworkAddr, A>;
+
     use axum_client_ip::ClientIpSource;
     use eyre::{Context, Result};
-    use tokio::net::TcpListener;
+    use serde::{Deserialize, Serialize};
 
-    use crate::BuiltInConfig;
+    use crate::{Settings, utils::shutdown::ShutdownHandle};
 
-    pub async fn setup_network(config: &BuiltInConfig) -> Result<(TcpListener, ClientIpSource)> {
-        let addr = format!("{}:{}", config.host, config.port);
+    #[cfg_attr(feature = "cli", derive(Clone, clap::ValueEnum))]
+    #[derive(Serialize, Deserialize)]
+    pub enum ReverseProxy {
+        Nginx,
+        Cloudflare,
+        Cloudfront,
+        FlyIo,
+        Akamai,
+        Envoy,
+        Other,
+        None,
+    }
 
-        let listener = TcpListener::bind(&addr)
-            .await
-            .context("Failed to bind listener")?;
-
-        tracing::info!("Listening on http://{addr}");
-
-        let ip_source = match &config.reverse_proxy {
-            None => ClientIpSource::ConnectInfo,
-            Some(proxy) => match proxy.as_str() {
-                "nginx" => ClientIpSource::XRealIp,
-                "cloudflare" => ClientIpSource::CfConnectingIp,
-                "cloudfront" => ClientIpSource::CloudFrontViewerAddress,
-                "flyio" => ClientIpSource::FlyClientIp,
-                "akamai" => ClientIpSource::TrueClientIp,
-                "envoy" => ClientIpSource::XEnvoyExternalAddress,
-                other => {
+    impl ReverseProxy {
+        pub fn ip_source(&self) -> ClientIpSource {
+            match self {
+                Self::Nginx => ClientIpSource::XRealIp,
+                Self::Cloudflare => ClientIpSource::CfConnectingIp,
+                Self::Cloudfront => ClientIpSource::CloudFrontViewerAddress,
+                Self::FlyIo => ClientIpSource::FlyClientIp,
+                Self::Akamai => ClientIpSource::TrueClientIp,
+                Self::Envoy => ClientIpSource::XEnvoyExternalAddress,
+                Self::None => ClientIpSource::ConnectInfo,
+                Self::Other => {
                     tracing::info!(
-                        "Expecting {other} reverse-proxy to provide X-Forwarded-For headers"
+                        "Expecting the reverse-proxy to provide X-Forwarded-For headers"
                     );
                     ClientIpSource::RightmostXForwardedFor
                 }
-            },
-        };
+            }
+        }
+    }
 
-        Ok((listener, ip_source))
+    impl Default for ReverseProxy {
+        fn default() -> Self {
+            Self::None
+        }
+    }
+
+    pub type Handle = axum_server::Handle<NetworkAddr>;
+
+    #[allow(unused)]
+    mod http {
+        use axum_server::accept::DefaultAcceptor;
+
+        use super::*;
+
+        #[derive(Serialize, Deserialize)]
+        #[cfg_attr(feature = "cli", derive(clap::Args))]
+        #[serde(default)]
+        pub struct NetworkConfig {
+            #[cfg_attr(feature = "cli", clap(default_value = "localhost:80"))]
+            pub address: NetworkAddr,
+        }
+
+        impl Default for NetworkConfig {
+            fn default() -> Self {
+                Self {
+                    address: "localhost:80".parse().unwrap(),
+                }
+            }
+        }
+
+        pub async fn connect(
+            _: &Settings,
+            config: &NetworkConfig,
+        ) -> Result<Connection<DefaultAcceptor>> {
+            let address = config.address;
+            tracing::info!("Listening on http://{address}");
+
+            let connection = Connection::bind(address);
+
+            let handle = ShutdownHandle::new();
+            let connection = handle.register_connection(connection);
+            handle.finalize();
+
+            Ok(connection)
+        }
+    }
+
+    #[cfg(not(feature = "tls"))]
+    pub use http::*;
+
+    #[cfg(feature = "tls")]
+    pub use https::*;
+
+    #[cfg(feature = "tls")]
+    mod https {
+        use std::path::PathBuf;
+
+        use axum::{
+            handler::HandlerWithoutStateExt,
+            http::Uri,
+            response::{IntoResponse, Redirect},
+        };
+        use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+        use bon::Builder;
+        use eyre::OptionExt;
+
+        use crate::errors::WebError;
+
+        use super::*;
+
+        // TODO: cli renames
+        #[derive(Serialize, Deserialize, Builder)]
+        #[serde(default)]
+        #[cfg_attr(feature = "cli", derive(clap::Args))]
+        pub struct NetworkConfig {
+            #[cfg_attr(feature = "cli", clap(flatten))]
+            #[serde(flatten)]
+            http: Option<super::http::NetworkConfig>,
+
+            #[cfg_attr(feature = "cli", clap(default_value = "localhost:443"))]
+            https_address: NetworkAddr,
+
+            #[serde(flatten)]
+            #[cfg_attr(feature = "cli", clap(flatten))]
+            certificates: Option<CertificateConfig>,
+        }
+
+        impl Default for NetworkConfig {
+            fn default() -> Self {
+                Self {
+                    http: None,
+                    https_address: "localhost:443".parse().unwrap(),
+                    certificates: None,
+                }
+            }
+        }
+
+        #[derive(Serialize, Deserialize)]
+        #[cfg_attr(feature = "cli", derive(clap::Args))]
+        pub struct CertificateConfig {
+            #[cfg_attr(feature = "cli", clap(long))]
+            pub cert: PathBuf,
+            #[cfg_attr(feature = "cli", clap(long))]
+            pub key: PathBuf,
+        }
+
+        impl CertificateConfig {
+            async fn read_into_rustls(&self) -> Result<RustlsConfig> {
+                RustlsConfig::from_pem_file(&self.cert, &self.key)
+                    .await
+                    .context("Failed to create CertificateConfig from PEM files")
+            }
+        }
+
+        fn make_https(uri: Uri, https_port: u16) -> Result<Uri> {
+            let mut parts = uri.into_parts();
+
+            parts.scheme = Some(axum::http::uri::Scheme::HTTPS);
+            parts.authority = Some(format!("localhost:{https_port}").parse()?);
+
+            if parts.path_and_query.is_none() {
+                parts.path_and_query = Some("/".parse()?);
+            }
+
+            Ok(Uri::from_parts(parts)?)
+        }
+
+        async fn http_redirect(
+            config: &NetworkConfig,
+            shutdown_handle: &ShutdownHandle,
+        ) -> Result<()> {
+            let http = match &config.http {
+                Some(v) => v,
+                None => return Ok(()),
+            };
+
+            let address = http.address;
+            tracing::info!("Redirecting from http://{address}");
+
+            let connection = Connection::bind(address);
+            let connection = shutdown_handle.register_connection(connection);
+
+            let https_port = config.https_address.port();
+
+            let redirect = move |uri: Uri| async move {
+                make_https(uri, https_port)
+                    .context("Failed to convert URI to https")
+                    .map_err(WebError::internal)
+                    .map(|uri| Redirect::permanent(&uri.to_string()))
+                    .into_response()
+            };
+
+            Ok(connection.serve(redirect.into_make_service()).await?)
+        }
+
+        pub async fn connect(
+            settings: &Settings,
+            config: &NetworkConfig,
+        ) -> Result<Connection<RustlsAcceptor>> {
+            let handle = ShutdownHandle::new();
+
+            http_redirect(config, &handle)
+                .await
+                .context("Failed to set up http -> https redirection")?;
+
+            let address = config.https_address;
+            tracing::info!("Listening on https://{address}");
+
+            let tls_config = match &settings.rustls {
+                Some(v) => v,
+                None => {
+                    &config
+                        .certificates
+                        .as_ref()
+                        .ok_or_eyre("Either provide RustlsSettings, or --cert, --key")?
+                        .read_into_rustls()
+                        .await?
+                }
+            };
+
+            // TODO: this clone should be fine... check later what tls_config inner is
+            let connection = axum_server::bind_rustls(address, tls_config.clone());
+
+            let connection = handle.register_connection(connection);
+            handle.finalize();
+
+            Ok(connection)
+        }
     }
 }
 
@@ -98,12 +318,12 @@ pub mod database {
 
     use eyre::{Context, Result};
 
-    use crate::BuiltInConfig;
+    use crate::RuntimeConfig;
 
     // TODO: this is only used if accessing db outside of axum. consider removal
     static DB: OnceLock<toasty::Db> = OnceLock::new();
 
-    pub async fn setup(config: &BuiltInConfig) -> Result<()> {
+    pub async fn setup(config: &RuntimeConfig) -> Result<()> {
         let uri = config.db.as_deref().unwrap_or_else(|| {
             tracing::warn!("Using an in-memory database. Data will not be saved!");
             ":memory:"
@@ -195,18 +415,14 @@ pub mod errors {
 
     pub type WebResult<T> = Result<T, WebError>;
 
-    impl From<(StatusCode, &'static str)> for WebError {
-        fn from(value: (StatusCode, &'static str)) -> Self {
-            let (code, string) = value;
-            Self::internal(string).code(code)
-        }
-    }
-
     // Eyre integration
 
-    impl From<eyre::Error> for WebError {
-        fn from(value: eyre::Error) -> Self {
-            Self::internal(value)
+    impl<T> From<T> for WebError
+    where
+        T: Into<eyre::Error>,
+    {
+        fn from(value: T) -> Self {
+            Self::internal(value.into())
         }
     }
 
