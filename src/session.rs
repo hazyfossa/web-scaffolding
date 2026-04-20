@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use axum::{
     extract::{FromRef, FromRequestParts},
     http::StatusCode,
@@ -9,7 +11,7 @@ use time::Duration;
 use tower_cookies::{Cookie, Cookies, SignedCookies, cookie::SameSite};
 
 use crate::{
-    BuiltInConfig, WebServer,
+    WebServer,
     errors::{WebError, WebResult},
     store::{ID, Store, ValueRef},
 };
@@ -175,7 +177,8 @@ impl Default for SessionSettings {
 }
 
 pub(crate) fn setup_sessions<Server: WebServer>(
-    config: &BuiltInConfig,
+    settings: SessionSettings,
+    key_file: Option<&Path>,
 ) -> Result<SessionState<Server::SessionData>> {
     let SessionSettings {
         cookie_name,
@@ -183,13 +186,13 @@ pub(crate) fn setup_sessions<Server: WebServer>(
         cleanup_interval,
         key,
         insecure,
-    } = Server::session_settings();
+    } = settings;
 
     let store = Store::<Server::SessionData>::new(lifetime).with_cleanup(cleanup_interval);
 
     let key = key
         .or_else(|| {
-            config.session_key_file.as_deref().and_then(|file| {
+            key_file.and_then(|file| {
                 let data = std::fs::read(file).ok()?;
                 Key::try_from(data.as_ref()).ok()
             })

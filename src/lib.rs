@@ -1,3 +1,5 @@
+#![allow(private_interfaces, private_bounds)] // TODO: this is only used for ConfigOverride
+
 use std::{marker::PhantomData, net::SocketAddr};
 
 use bon::Builder;
@@ -36,7 +38,7 @@ pub use axum_htmx as htmx;
 mod utils;
 pub use utils::{errors, scheduler};
 
-// Config
+// Runtime config
 
 #[cfg(feature = "cli")]
 #[derive(clap::Parser)]
@@ -71,7 +73,7 @@ struct BuiltInConfig {
 
     #[cfg(feature = "session")]
     #[cfg_attr(feature = "cli", clap(long))]
-    session_key_file: Option<String>,
+    session_key_file: Option<std::path::PathBuf>,
 }
 
 impl Default for BuiltInConfig {
@@ -80,7 +82,6 @@ impl Default for BuiltInConfig {
     }
 }
 
-#[allow(private_interfaces)]
 pub type ConfigOverride = BuiltInConfig;
 
 #[derive(Builder)]
@@ -101,7 +102,9 @@ struct Config<S: WebServer> {
     user_defined: Option<S>,
 }
 
-async fn load_config<S: WebServer>() -> Result<Config<S>> {
+async fn load_config<S: WebServer>() -> Result<(Settings, Config<S>)> {
+    let mut settings = S::settings();
+
     #[cfg(feature = "cli")]
     let (config_file, from_cli) = {
         use clap::Parser;
@@ -120,7 +123,10 @@ async fn load_config<S: WebServer>() -> Result<Config<S>> {
     };
 
     // Only override built-ins, since user_defined overrides are just... defaults
-    let from_compile_time = S::config_override().map(|v| Config::builder().built_in(v).build());
+    let from_compile_time = settings
+        .config_override
+        .take()
+        .map(|v| Config::builder().built_in(v).build());
 
     let from_file: Option<Config<S>> = match config_file {
         None => None,
@@ -132,7 +138,19 @@ async fn load_config<S: WebServer>() -> Result<Config<S>> {
         .wrap_err_with(|| format!("Failed to read config from {path:?}"))?,
     };
 
-    merge!(from_file, from_cli, from_compile_time)
+    let config = merge!(from_file, from_cli, from_compile_time)?;
+    Ok((settings, config))
+}
+
+// Settings (compile-time config)
+#[derive(Builder, Default)]
+pub struct Settings {
+    config_override: Option<ConfigOverride>,
+
+    cors: Option<Cors>,
+
+    #[cfg(feature = "session")]
+    session: Option<SessionSettings>,
 }
 
 // State
@@ -190,37 +208,22 @@ pub type Router<S> = axum::Router<ServerState<S>>;
 pub trait WebServer: WebServerLoad + Send + Sync + 'static + Sized {
     async fn init(self) -> Result<Router<Self>>;
 
+    fn settings() -> Settings {
+        Settings::default()
+    }
+
     // TODO: better asset handling
     fn assets() -> impl LoadAssets;
 
     #[cfg(feature = "session")]
     type SessionData: store::Value;
-
-    #[cfg(feature = "session")]
-    fn session_settings() -> SessionSettings {
-        SessionSettings::default()
-    }
-
-    #[cfg(feature = "htmx")]
-    /// Single Page Application mode:
-    /// will redirect any non-htmx requests to "/"
-    const SPA: bool = false;
-
-    fn cors() -> Option<Cors> {
-        None
-    }
-
-    #[allow(private_interfaces)]
-    fn config_override() -> Option<ConfigOverride> {
-        None
-    }
 }
 
 pub async fn run_server<Server: WebServer>() -> Result<()> {
     simple_eyre::install()?;
     tracing_subscriber::fmt::init();
 
-    let config = load_config::<Server>()
+    let (mut settings, config) = load_config::<Server>()
         .await
         .context("Failed to load config")?;
 
@@ -240,7 +243,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     let middleware = ServiceBuilder::new()
         .layer(CatchPanicLayer::new())
         .layer(ip_source.into_extension())
-        .option_layer(Server::cors());
+        .option_layer(settings.cors);
 
     #[cfg(feature = "compression")]
     let middleware = middleware.layer(
@@ -261,12 +264,15 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     let middleware = middleware.layer(tower_cookies::CookieManagerLayer::new());
 
     #[cfg(feature = "session")]
-    let state = { state.session_state(session::setup_sessions::<Server>(&config.built_in)?) };
+    let state = {
+        state.session_state(session::setup_sessions::<Server>(
+            settings.session.take().unwrap_or_default(),
+            config.built_in.session_key_file.as_deref(),
+        )?)
+    };
 
     #[cfg(feature = "htmx")]
-    let middleware = middleware
-        .layer(axum_htmx::AutoVaryLayer)
-        .option_layer(Server::SPA.then_some(axum_htmx::HxRequestGuardLayer::new("/")));
+    let middleware = middleware.layer(axum_htmx::AutoVaryLayer);
 
     let router = router
         .fallback_service(utils::assets::ServeAssets::from(Server::assets()))
