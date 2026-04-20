@@ -93,7 +93,9 @@ struct Config<S: WebServer> {
     built_in: BuiltInConfig,
 
     #[cfg(not(feature = "config"))]
-    #[builder(default = PhantomData)]
+    #[builder(skip = PhantomData)]
+    #[serde(skip)]
+    #[clap(skip)]
     _s: PhantomData<S>,
 
     #[cfg(feature = "config")]
