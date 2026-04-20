@@ -1,13 +1,11 @@
 use std::{marker::PhantomData, net::SocketAddr};
 
 use bon::Builder;
-use clap::Args;
-use clap::Parser;
 use derive_where::derive_where;
 pub use rust_embed::Embed as LoadAssets;
 
 use eyre::{Context, Result};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use tower::ServiceBuilder;
@@ -40,7 +38,8 @@ pub use utils::{errors, scheduler};
 
 // Config
 
-#[derive(Parser)]
+#[cfg(feature = "cli")]
+#[derive(clap::Parser)]
 struct Cli<S: WebServer> {
     /// configuration file (cli options take precedence)
     #[clap(short, long)]
@@ -49,29 +48,29 @@ struct Cli<S: WebServer> {
     config: Config<S>,
 }
 
-#[derive(Serialize, Deserialize, Builder, Args)]
+#[derive(Serialize, Deserialize, Builder)]
 #[serde(default)]
-/// Runtime configuration
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 struct BuiltInConfig {
-    #[clap(long)]
-    #[clap(default_value = "localhost")]
+    #[cfg_attr(feature = "cli", clap(long))]
+    #[cfg_attr(feature = "cli", clap(default_value = "localhost"))]
     #[builder(default = "localhost".into())]
     host: String,
 
-    #[clap(default_value = "8080")]
+    #[cfg_attr(feature = "cli", clap(short, long))]
+    #[cfg_attr(feature = "cli", clap(default_value = "8080"))]
     #[builder(default = 8080)]
-    #[clap(short, long)]
     port: u16,
 
-    #[clap(long)]
+    #[cfg_attr(feature = "cli", clap(long))]
     reverse_proxy: Option<String>,
 
     #[cfg(feature = "database")]
-    #[clap(long)]
+    #[cfg_attr(feature = "cli", clap(long))]
     db: Option<String>,
 
     #[cfg(feature = "session")]
-    #[clap(long)]
+    #[cfg_attr(feature = "cli", clap(long))]
     session_key_file: Option<String>,
 }
 
@@ -84,30 +83,46 @@ impl Default for BuiltInConfig {
 #[allow(private_interfaces)]
 pub type ConfigOverride = BuiltInConfig;
 
-#[derive(Serialize, Deserialize, Default, Args)]
-struct Config<S: Args> {
+#[derive(Builder)]
+#[derive_where(Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+struct Config<S: WebServer> {
     #[serde(flatten)]
-    #[clap(flatten)]
+    #[cfg_attr(feature = "cli", clap(flatten))]
     built_in: BuiltInConfig,
 
+    #[cfg(not(feature = "config"))]
+    #[builder(default = PhantomData)]
+    _s: PhantomData<S>,
+
+    #[cfg(feature = "config")]
     #[serde(flatten)]
-    #[clap(flatten)]
+    #[cfg_attr(feature = "cli", clap(flatten))]
     user_defined: Option<S>,
 }
 
 async fn load_config<S: WebServer>() -> Result<Config<S>> {
-    let cli = Cli::<S>::parse();
+    #[cfg(feature = "cli")]
+    let (config_file, from_cli) = {
+        use clap::Parser;
+        let cli = Cli::<S>::parse();
+        (cli.config_file, Some(cli.config))
+    };
 
-    let from_cli = cli.config;
+    #[cfg(not(feature = "cli"))]
+    let (config_file, from_cli) = {
+        (
+            std::env::var("WEB_CONFIG")
+                .ok()
+                .map(std::path::PathBuf::from),
+            None,
+        )
+    };
 
-    // Only override built-ins, since user_defined overrides
-    // are just... defaults
-    let from_compile_time = S::config_override().map(|v| Config {
-        user_defined: None,
-        built_in: v,
-    });
+    // Only override built-ins, since user_defined overrides are just... defaults
+    let from_compile_time = S::config_override().map(|v| Config::builder().built_in(v).build());
 
-    let from_file: Option<Config<S>> = match cli.config_file {
+    let from_file: Option<Config<S>> = match config_file {
         None => None,
         Some(path) => async {
             let data = fs::read_to_string(&path).await?;
@@ -151,18 +166,39 @@ impl<T: WebServer> FromRef<ServerState<T>> for SessionState<T::SessionData> {
     }
 }
 
+// Loaders
+
+// TODO: these can be simplified once cfg attrs are supporten on `where` bounds
+
+#[allow(unused)]
+use serde::de::DeserializeOwned;
+
+#[cfg(not(feature = "config"))]
+trait_alias!(trait WebServerLoad: Default);
+
+#[cfg(all(feature = "config", not(feature = "cli")))]
+trait_alias!(trait WebServerLoad: Serialize + DeserializeOwned + Default);
+
+#[cfg(all(feature = "config", feature = "cli"))]
+trait_alias!(trait WebServerLoad: Serialize + DeserializeOwned + Default + clap::Args);
+
 // Main
 
 pub type Router<S> = axum::Router<ServerState<S>>;
 
-#[allow(async_fn_in_trait)]
-pub trait WebServer: Args + Serialize + DeserializeOwned + Default + Send + Sync + 'static {
+#[allow(async_fn_in_trait, private_bounds)]
+pub trait WebServer: WebServerLoad + Send + Sync + 'static + Sized {
+    async fn init(self) -> Result<Router<Self>>;
+
+    // TODO: better asset handling
+    fn assets() -> impl LoadAssets;
+
     #[cfg(feature = "session")]
     type SessionData: store::Value;
 
     #[cfg(feature = "session")]
     fn session_settings() -> SessionSettings {
-        SessionSettings::builder().build()
+        SessionSettings::default()
     }
 
     #[cfg(feature = "htmx")]
@@ -174,15 +210,10 @@ pub trait WebServer: Args + Serialize + DeserializeOwned + Default + Send + Sync
         None
     }
 
-    // TODO: better asset handling
-    fn assets() -> impl LoadAssets;
-
     #[allow(private_interfaces)]
     fn config_override() -> Option<ConfigOverride> {
         None
     }
-
-    async fn init(self) -> Result<Router<Self>>;
 }
 
 pub async fn run_server<Server: WebServer>() -> Result<()> {
@@ -197,7 +228,12 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .await
         .context("Failed to set up network")?;
 
-    let router = Server::init(config.user_defined.unwrap_or_default()).await?;
+    #[cfg(feature = "config")]
+    let user_config = config.user_defined.unwrap_or_default();
+    #[cfg(not(feature = "config"))]
+    let user_config = Server::default();
+
+    let router = Server::init(user_config).await?;
 
     let state = ServerState::<Server>::builder();
 

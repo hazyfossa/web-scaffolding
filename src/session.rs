@@ -168,6 +168,12 @@ pub struct SessionSettings {
     pub insecure: bool,
 }
 
+impl Default for SessionSettings {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
 pub(crate) fn setup_sessions<Server: WebServer>(
     config: &BuiltInConfig,
 ) -> Result<SessionState<Server::SessionData>> {

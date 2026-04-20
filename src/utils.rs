@@ -288,6 +288,16 @@ pub mod assets {
     }
 }
 
+mod macros {
+    #[macro_export(local_inner_macros)]
+    macro_rules! trait_alias {
+        ($vis:vis trait $name:ident : $($for:tt)*) => {
+            $vis trait $name: $($for)* {}
+            impl<T: $($for)*> $name for T {}
+        };
+    }
+}
+
 #[cfg(feature = "store")]
 pub mod timed_uuid {
     use std::{fmt::Display, ops::Deref, str::FromStr};
@@ -382,16 +392,15 @@ pub mod json_merge {
         };
     }
 
-    pub fn merge<I, T, V>(values: I) -> Result<T>
+    pub fn merge<I, T>(values: I) -> Result<T>
     where
-        I: IntoIterator<Item = (&'static str, V)>,
+        I: IntoIterator<Item = (&'static str, Option<T>)>,
         T: Serialize + DeserializeOwned + Default,
-        V: Into<Option<T>>,
     {
         let mut target = value("target", T::default())?;
 
         for (name, diff) in values {
-            if let Some(diff) = diff.into() {
+            if let Some(diff) = diff {
                 merge_values(&mut target, &value(name, diff)?);
             }
         }
@@ -425,6 +434,59 @@ pub mod json_merge {
 
             // any other
             (a, b) => *a = b.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use serde_json::{Value, json};
+
+        #[test]
+        fn test_merge_objects() {
+            let a = json!({"a": 1});
+            let b = json!({"b": 2});
+            let result: Value = merge!(a, b).unwrap();
+            assert_eq!(result, json!({"a": 1, "b": 2}));
+        }
+
+        #[test]
+        fn test_nested_merge() {
+            let a = json!({"obj": {"x": 1}});
+            let b = json!({"obj": {"y": 2}});
+            let result: Value = merge!(a, b).unwrap();
+            assert_eq!(result, json!({"obj": {"x": 1, "y": 2}}));
+        }
+
+        #[test]
+        fn test_array_extend() {
+            let a = json!({"arr": [1]});
+            let b = json!({"arr": [2, 3]});
+            let result: Value = merge!(a, b).unwrap();
+            assert_eq!(result, json!({"arr": [1, 2, 3]}));
+        }
+
+        #[test]
+        fn test_array_push_object() {
+            let a = json!({"arr": [1]});
+            let b = json!({"arr": {"key": "value"}});
+            let result: Value = merge!(a, b).unwrap();
+            assert_eq!(result, json!({"arr": [1, {"key": "value"}]}));
+        }
+
+        #[test]
+        fn test_overwrite() {
+            let a = json!({"a": 1});
+            let b = json!({"a": 2});
+            let result: Value = merge!(a, b).unwrap();
+            assert_eq!(result, json!({"a": 2}));
+        }
+
+        #[test]
+        fn test_skip_none() {
+            let a = json!({"a": 1});
+            let b: Option<Value> = None;
+            let result: Value = merge!(a, b).unwrap();
+            assert_eq!(result, json!({"a": 1}));
         }
     }
 }
