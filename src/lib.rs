@@ -9,17 +9,20 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+use tracing::Dispatch;
+use tracing_subscriber::util::SubscriberInitExt;
 
 mod network;
 use network::{NetworkAddr, NetworkConfig, ReverseProxy};
 
 mod utils;
-pub use utils::{errors, scheduler};
 
 pub use axum_client_ip::ClientIp;
 pub use rust_embed::Embed as LoadAssets;
 pub use tower_http::cors::CorsLayer as Cors;
-pub use tracing_subscriber::fmt::SubscriberBuilder as TracingSettings;
+pub use tracing;
+pub use tracing_subscriber as tracing_settings;
+pub use utils::{errors, scheduler};
 
 #[cfg(feature = "store")]
 pub mod store;
@@ -151,7 +154,8 @@ async fn load_config<S: WebServer>() -> Result<(Settings, Config<S>)> {
 pub struct Settings {
     config_override: Option<ConfigOverride>,
 
-    tracing: Option<TracingSettings>,
+    #[builder(into)]
+    tracing: Option<Dispatch>,
 
     cors: Option<Cors>,
 
@@ -166,6 +170,7 @@ pub struct Settings {
 
 #[derive_where(Clone)]
 #[derive(Builder)]
+#[builder(builder_type(vis = ""))]
 pub struct ServerState<T: WebServer> {
     #[builder(skip = PhantomData)]
     _never_empty: PhantomData<T>,
@@ -237,7 +242,11 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
         .await
         .context("Failed to load config")?;
 
-    settings.tracing.take().unwrap_or_default().init();
+    if let Some(custom_tracing) = settings.tracing.take() {
+        custom_tracing.init();
+    } else {
+        tracing_subscriber::registry().init();
+    };
 
     #[cfg(feature = "config")]
     let user_config = config.user_defined.unwrap_or_default();
