@@ -84,13 +84,11 @@ pub mod database {
 
     use eyre::{Context, Result};
 
-    use crate::RuntimeConfig;
-
     // TODO: this is only used if accessing db outside of axum. consider removal
     static DB: OnceLock<toasty::Db> = OnceLock::new();
 
-    pub async fn setup(config: &RuntimeConfig) -> Result<()> {
-        let uri = config.db.as_deref().unwrap_or_else(|| {
+    pub async fn setup(url: Option<&str>) -> Result<()> {
+        let uri = url.unwrap_or_else(|| {
             tracing::warn!("Using an in-memory database. Data will not be saved!");
             ":memory:"
         });

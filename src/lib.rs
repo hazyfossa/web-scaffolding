@@ -19,6 +19,7 @@ pub use utils::{errors, scheduler};
 pub use axum_client_ip::ClientIp;
 pub use rust_embed::Embed as LoadAssets;
 pub use tower_http::cors::CorsLayer as Cors;
+pub use tracing_subscriber::fmt::SubscriberBuilder as TracingSettings;
 
 #[cfg(feature = "store")]
 pub mod store;
@@ -150,6 +151,8 @@ async fn load_config<S: WebServer>() -> Result<(Settings, Config<S>)> {
 pub struct Settings {
     config_override: Option<ConfigOverride>,
 
+    tracing: Option<TracingSettings>,
+
     cors: Option<Cors>,
 
     #[cfg(feature = "session")]
@@ -229,11 +232,12 @@ pub trait WebServer: WebServerLoad + Send + Sync + 'static + Sized {
 
 pub async fn run_server<Server: WebServer>() -> Result<()> {
     simple_eyre::install()?;
-    tracing_subscriber::fmt::init();
 
     let (mut settings, config) = load_config::<Server>()
         .await
         .context("Failed to load config")?;
+
+    settings.tracing.take().unwrap_or_default().init();
 
     #[cfg(feature = "config")]
     let user_config = config.user_defined.unwrap_or_default();
@@ -261,7 +265,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
 
     #[cfg(feature = "database")]
     let state = {
-        utils::database::setup(&config).await?;
+        utils::database::setup(config.db.as_deref()).await?;
         state.db(database())
     };
 
