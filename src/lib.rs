@@ -35,11 +35,6 @@ pub mod session;
 #[cfg(feature = "session")]
 pub use crate::session::{SessionSettings, SessionState};
 
-#[cfg(feature = "database")]
-pub use toasty;
-#[cfg(feature = "database")]
-pub use utils::database::get as database;
-
 #[cfg(feature = "htmx")]
 pub use axum_htmx as htmx;
 
@@ -218,7 +213,7 @@ trait_alias!(trait WebServerLoad: Serialize + DeserializeOwned + Default + clap:
 
 pub type Router<S> = axum::Router<ServerState<S>>;
 
-#[allow(async_fn_in_trait, private_bounds)]
+#[allow(async_fn_in_trait)]
 pub trait WebServer: WebServerLoad + Send + Sync + 'static + Sized {
     async fn init(self) -> Result<Router<Self>>;
 
@@ -233,6 +228,9 @@ pub trait WebServer: WebServerLoad + Send + Sync + 'static + Sized {
 
     #[cfg(feature = "session")]
     type SessionData: store::Value;
+
+    #[cfg(feature = "database")]
+    fn db_models() -> toasty::ModelSet;
 }
 
 pub async fn run_server<Server: WebServer>() -> Result<()> {
@@ -245,7 +243,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     if let Some(custom_tracing) = settings.tracing.take() {
         custom_tracing.init();
     } else {
-        tracing_subscriber::registry().init();
+        tracing_subscriber::fmt::init();
     };
 
     #[cfg(feature = "config")]
@@ -273,10 +271,7 @@ pub async fn run_server<Server: WebServer>() -> Result<()> {
     );
 
     #[cfg(feature = "database")]
-    let state = {
-        utils::database::setup(config.db.as_deref()).await?;
-        state.db(database())
-    };
+    let state = state.db(utils::database::setup(config.db.as_deref(), Server::db_models()).await?);
 
     #[cfg(feature = "cookies")]
     let middleware = middleware.layer(tower_cookies::CookieManagerLayer::new());
@@ -318,6 +313,20 @@ macro_rules! assets {
             Assets
         }
     };
+}
+
+#[cfg(feature = "database")]
+#[macro_export]
+macro_rules! db_models {
+    ($($body:tt)*) => {
+        fn db_models() -> toasty::ModelSet {
+            $crate::db_models!(ret = $($body:tt)* @or_default);
+            ret
+        }
+    };
+
+    ($ret:ident = $($body:tt)+ @or_default ) => { $ret = toasty::models!($($body:tt)+); };
+    ($ret:ident = @or_default) => { $ret = toasty::models!(crate::*); };
 }
 
 #[macro_export]

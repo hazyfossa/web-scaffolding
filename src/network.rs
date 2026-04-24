@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Settings, utils::shutdown::ShutdownHandle};
 
 #[cfg_attr(feature = "cli", derive(Clone, clap::ValueEnum))]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub enum ReverseProxy {
     Nginx,
     Cloudflare,
@@ -20,6 +20,8 @@ pub enum ReverseProxy {
     Akamai,
     Envoy,
     Other,
+
+    #[default]
     None,
 }
 
@@ -38,12 +40,6 @@ impl ReverseProxy {
                 ClientIpSource::RightmostXForwardedFor
             }
         }
-    }
-}
-
-impl Default for ReverseProxy {
-    fn default() -> Self {
-        Self::None
     }
 }
 

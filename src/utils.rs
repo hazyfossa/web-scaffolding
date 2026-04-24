@@ -80,21 +80,38 @@ pub mod scheduler {
 
 #[cfg(feature = "database")]
 pub mod database {
-    use std::sync::OnceLock;
+    #[cfg(not(feature = "db-sqlite"))]
+    use eyre::OptionExt;
 
     use eyre::{Context, Result};
+    use toasty::{Db, ModelSet};
 
-    // TODO: this is only used if accessing db outside of axum. consider removal
-    static DB: OnceLock<toasty::Db> = OnceLock::new();
+    // TODO: ponder on design on WebServer
+    // consider:
+    //
+    // auto-initializing with models!(crate::*), overridable with settings
+    // + intuitive
+    // - requires a lot of macro magic
+    //
+    // merging into Settings
+    // + clean
+    // - very unintuitive
 
-    pub async fn setup(url: Option<&str>) -> Result<()> {
-        let uri = url.unwrap_or_else(|| {
+    pub async fn setup(url: Option<&str>, models: ModelSet) -> Result<Db> {
+        #[cfg(feature = "db-sqlite")]
+        let url = url.unwrap_or_else(|| {
             tracing::warn!("Using an in-memory database. Data will not be saved!");
-            ":memory:"
+            "sqlite::memory:"
         });
 
+        #[cfg(not(feature = "db-sqlite"))]
+        let url = url.ok_or_eyre(
+            "No database URL was provided. Use db-sqlite driver for an in-memory database.",
+        )?;
+
         let db = toasty::Db::builder()
-            .connect(&uri)
+            .models(models)
+            .connect(&url)
             .await
             .context("Failed to connect to database")?;
 
@@ -104,12 +121,7 @@ pub mod database {
 
         tracing::info!("Connected to database");
 
-        DB.set(db).expect("Database already initialized");
-        Ok(())
-    }
-
-    pub fn get() -> toasty::Db {
-        DB.get().expect("Database not initialized").clone()
+        Ok(db)
     }
 }
 
