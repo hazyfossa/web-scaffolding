@@ -117,11 +117,10 @@ where
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
-        // TODO: is this pattern common enough to include into `errors`?
-        // we also do this in sessions...
         let cookies = Cookies::from_request_parts(parts, state)
             .await
-            .map_err(|(code, text)| WebError::internal(text).code(code))?;
+            .map_err(WebError::from_tuple)?;
+
         Ok(Cookie::<T>::get_from(cookies)?)
     }
 }

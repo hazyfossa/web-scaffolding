@@ -129,9 +129,10 @@ pub mod database {
 pub mod errors {
     use axum::{BoxError, http::StatusCode, response::IntoResponse};
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     enum WebErrorKind {
         Client,
+        #[default]
         Internal,
     }
 
@@ -143,13 +144,8 @@ pub mod errors {
     }
 
     impl WebError {
-        pub fn code(mut self, value: StatusCode) -> Self {
-            self.code.replace(value);
-            self
-        }
-
         pub fn internal(error: impl Into<BoxError>) -> Self {
-            WebError {
+            Self {
                 kind: WebErrorKind::Internal,
                 inner: error.into(),
                 code: None,
@@ -157,15 +153,22 @@ pub mod errors {
         }
 
         pub fn client(error: impl Into<BoxError>) -> Self {
-            WebError {
+            Self {
                 kind: WebErrorKind::Client,
                 inner: error.into(),
                 code: None,
             }
         }
-    }
 
-    // TODO: color-eyre does not play well with tracing
+        pub fn from_tuple(v: (StatusCode, &str)) -> Self {
+            let (code, text) = v;
+            Self {
+                kind: WebErrorKind::Internal,
+                inner: text.into(),
+                code: Some(code),
+            }
+        }
+    }
 
     impl IntoResponse for WebError {
         fn into_response(self) -> axum::response::Response {
@@ -198,17 +201,30 @@ pub mod errors {
         T: Into<eyre::Error>,
     {
         fn from(value: T) -> Self {
-            Self::internal(value.into())
+            WebError::internal(value.into())
         }
     }
 
-    pub trait EyreWebExt {
-        fn client_error(self) -> WebError;
+    pub trait ResultWebExt<T> {
+        fn client_error(self) -> Result<T, WebError>;
     }
 
-    impl EyreWebExt for eyre::Error {
-        fn client_error(self) -> WebError {
-            WebError::client(self)
+    impl<T, E: Into<eyre::Error>> ResultWebExt<T> for Result<T, E> {
+        fn client_error(self) -> Result<T, WebError> {
+            self.map_err(|e| WebError::client(e.into()))
+        }
+    }
+
+    pub trait ResultCodeExt<T> {
+        fn code(self, v: StatusCode) -> Result<T, WebError>;
+    }
+
+    impl<T> ResultCodeExt<T> for WebResult<T> {
+        fn code(self, v: StatusCode) -> Result<T, WebError> {
+            self.map_err(|mut e| {
+                e.code.replace(v);
+                e
+            })
         }
     }
 }
@@ -219,10 +235,12 @@ pub mod assets {
         http::{Method, StatusCode, header},
         response::{IntoResponse, Response},
     };
-    use eyre::eyre;
+    use eyre::{OptionExt, eyre};
     use rust_embed::{EmbeddedFile, RustEmbed};
 
-    use super::errors::{EyreWebExt, WebResult};
+    use crate::errors::ResultCodeExt;
+
+    use super::errors::{ResultWebExt, WebResult};
 
     #[derive(Clone)]
     pub struct ServeAssets {
@@ -242,16 +260,15 @@ pub mod assets {
         fn serve(&self, request: Request) -> WebResult<Response> {
             let uri = request.uri().path().trim_start_matches('/');
 
-            let content = (self.get)(uri).ok_or(
-                eyre!("404 Not Found")
-                    .client_error()
-                    .code(StatusCode::NOT_FOUND),
-            )?;
+            let content = (self.get)(uri)
+                .ok_or_eyre("404 Not Found")
+                .client_error()
+                .code(StatusCode::NOT_FOUND)?;
 
             if request.method() != Method::GET {
-                return Err(eyre!("Method Not Allowed")
+                return Err(eyre!("Method Not Allowed"))
                     .client_error()
-                    .code(StatusCode::METHOD_NOT_ALLOWED));
+                    .code(StatusCode::METHOD_NOT_ALLOWED);
             };
 
             Ok((

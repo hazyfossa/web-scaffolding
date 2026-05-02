@@ -6,13 +6,13 @@ use axum::{
 };
 use bon::Builder;
 use derive_where::derive_where;
-use eyre::{ContextCompat, Result};
+use eyre::{ContextCompat, OptionExt, Result};
 use time::Duration;
 use tower_cookies::{Cookie, Cookies, SignedCookies, cookie::SameSite};
 
 use crate::{
     WebServer,
-    errors::{WebError, WebResult},
+    errors::{ResultCodeExt, ResultWebExt, WebError, WebResult},
     store::{ID, Store, ValueRef},
 };
 
@@ -44,7 +44,9 @@ impl<T> Session<T> {
             .await
             // NOTE: the error case happens if a request handler passes a session
             // off to a long-running task, which tries to actually use the session much later
-            .ok_or(WebError::client("Session expired").code(StatusCode::UNAUTHORIZED))?;
+            .ok_or_eyre("Session expired")
+            .client_error()
+            .code(StatusCode::UNAUTHORIZED)?;
 
         Ok(entry)
     }
@@ -87,7 +89,9 @@ impl<T> SessionManager<T> {
 
         resolve_current()
             .await
-            .ok_or(WebError::client("Unauthorized").code(StatusCode::UNAUTHORIZED))
+            .ok_or_eyre("Unauthorized")
+            .client_error()
+            .code(StatusCode::UNAUTHORIZED)
     }
 
     pub async fn create(&self, data: T) -> Result<ValueRef<'_, T>> {
@@ -129,7 +133,7 @@ where
         let state = SessionState::from_ref(&state);
         let cookies = Cookies::from_request_parts(parts, &state)
             .await
-            .map_err(|(code, text)| WebError::internal(text).code(code))?;
+            .map_err(WebError::from_tuple)?;
 
         Ok(Self {
             state,
